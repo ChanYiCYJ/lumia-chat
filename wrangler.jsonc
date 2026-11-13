@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Lumia Chat 独立部署到 Cloudflare Workers。
+  // 说明：
+  //  - assets.directory 指向构建产物 dist，静态资源由 Cloudflare 自动托管
+  //  - not_found_handling 为 single-page-application：前端路由刷新时回退到 index.html
+  //  - worker.js 负责把 /api 与 /static 反代到真实后端(服务端转发，无 CORS 问题)
+  // 部署步骤：
+  //  1. 构建：            npm run build
+  //  2. 配置后端地址：    npx wrangler secret put API_BACKEND
+  //  3. 部署：            npx wrangler deploy
+  //  4. 绑定自定义域名：  Cloudflare 控制台 → Workers → lumia-chat → 设置 → Domains & Routes
+  "name": "lumia-chat",
+  "main": "worker.js",
+  "compatibility_date": "2025-04-01",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+  },
+  "vars": {
+    // API_BACKEND 用 Secret 配置，避免把后端地址写入仓库。
+  },
+  "observability": {
+    "enabled": true,
+  },
+}
