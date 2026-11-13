@@ -18,6 +18,11 @@
     "dev:cf": "wrangler dev"
   },
   "dependencies": {
+    "@blocknote/core": "^0.53.0",
+    "@blocknote/mantine": "^0.53.0",
+    "@blocknote/react": "^0.53.0",
+    "@mantine/core": "^9.5.1",
+    "@mantine/hooks": "^9.5.1",
     "pixi-live2d-display": "^0.4.0",
     "pixi.js": "^6.5.10",
     "react": "^19.2.7",
