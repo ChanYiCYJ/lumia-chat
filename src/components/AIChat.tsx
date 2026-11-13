@@ -352,7 +352,7 @@ const MessageItem = memo(function MessageItem({
 }) {
   return (
     <div
-      className={`group flex animate-[kfade_0.3s_ease-out] gap-3 py-4 ${
+      className={`group flex chat-message-enter gap-3 py-4 ${
         m.role === "user" ? "justify-end" : ""
       } sm:py-5`}
     >
@@ -1341,9 +1341,10 @@ export function AIChat({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
-      return localStorage.getItem("kimo_ai_sidebar_collapsed") === "1";
+      const saved = localStorage.getItem("kimo_ai_sidebar_collapsed");
+      return saved === null || saved === "1";
     } catch {
-      return false;
+      return true;
     }
   });
   /** 侧边栏会话拖拽排序：拖拽中的卡片索引 + 悬停目标索引（用于插入指示） */
@@ -3638,11 +3639,10 @@ export function AIChat({
               </p>
               <ul className="mt-2 space-y-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
                 <li>
-                  对话记录、角色设定、自定义 API
-                  均保存在您的本机浏览器，不会上传服务器。
+                  对话记录和设置默认保存在本机；启用云端备份或 Notion 时，相关内容会发送到对应服务。
                 </li>
                 <li>
-                  API 密钥仅用于在本机调用模型接口，网站不存储、不读取您的密钥。
+                  自定义 API 密钥保存在本机，发起对话时会发送给您配置的模型服务商。
                 </li>
               </ul>
             </section>
@@ -3678,7 +3678,7 @@ export function AIChat({
               <p className="mt-2 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
                 如有问题或建议，欢迎到{" "}
                 <a
-                  href="https://github.com/ChanYiCYJ/lumia-frontend/issues"
+                  href="https://github.com/ChanYiCYJ/lumia-chat/issues"
                   target="_blank"
                   rel="noreferrer"
                   className="text-blue-600 hover:underline dark:text-blue-400"
@@ -3716,12 +3716,6 @@ export function AIChat({
               </svg>
               我已阅读并同意 · 开始对话
             </button>
-            <Link
-              to="/"
-              className="block animate-[kfade_0.4s_ease-out_0.42s_both] text-center text-xs text-gray-400 transition hover:text-gray-600"
-            >
-              返回网站首页
-            </Link>
           </div>
         </div>
       </div>
