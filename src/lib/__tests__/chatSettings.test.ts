@@ -351,8 +351,8 @@ describe("chatSettings · TTS 来源（内置后端 / 第三方地址）", () =>
     expect(loadTtsSource()).toBe("backend");
   });
 
-  it("BACKEND_TTS_TEMPLATE 指向本站后端", () => {
-    expect(BACKEND_TTS_TEMPLATE).toBe("/api/v1/tts?text={text}");
+  it("BACKEND_TTS_TEMPLATE 指向同源 TTS 代理", () => {
+    expect(BACKEND_TTS_TEMPLATE).toBe("/api/tts?text={text}");
   });
 
   it("resolveTtsAudioUrl：内置后端走模板 + 追加音色", () => {
@@ -363,7 +363,7 @@ describe("chatSettings · TTS 来源（内置后端 / 第三方地址）", () =>
       "你好，世界",
     );
     expect(u).toBe(
-      "/api/v1/tts?text=" +
+      "/api/tts?text=" +
         encodeURIComponent("你好，世界") +
         "&voice=zh-CN-XiaoxiaoNeural",
     );

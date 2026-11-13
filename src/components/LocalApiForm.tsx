@@ -17,6 +17,7 @@ import {
   type TestConnectionResult,
   type FetchModelsResult,
 } from "../lib/providerTest";
+import { btnPrimary, btnSoft, inputCls } from "./ui";
 
 /**
  * 本地模型 API 配置表单（共享组件）。
@@ -35,9 +36,6 @@ export interface LocalApiFormProps {
   /** inline 模式下显示“自定义 API 已启用（限制已解除）”提示 */
   showEnabledHint?: boolean;
 }
-
-const inputCls =
-  "w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm outline-none transition focus:border-gray-400 dark:border-gray-700 dark:bg-gray-800";
 
 export function LocalApiForm({
   pageId,
@@ -130,39 +128,84 @@ export function LocalApiForm({
 
   return (
     <>
-      {/* 一键预设：DeepSeek / Kimi / OpenAI */}
-      <div className="space-y-1">
+      {/* 一键预设：常用直连服务商与模型聚合服务 */}
+      <div className={isModal ? "space-y-2" : "space-y-1"}>
         {isModal && (
-          <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">
-            快捷预设
-          </label>
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-semibold text-fg">选择服务商</label>
+            <span className="text-[11px] text-fg-muted">
+              自动填入接口与推荐模型
+            </span>
+          </div>
         )}
-        <div className="flex flex-wrap gap-1.5">
-          {PROVIDER_PRESETS.map((p) => {
-            const active = provider === p.id;
-            return (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => applyPreset(p.id)}
-                title={p.desc}
-                className={`rounded-full border px-3 py-1.5 text-xs font-medium transition active:scale-95 ${
-                  active
-                    ? "border-gray-900 bg-gray-900 text-white dark:border-gray-200 dark:bg-gray-200 dark:text-gray-900"
-                    : "border-gray-200 bg-white text-gray-600 hover:border-gray-400 hover:text-gray-900 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:text-white"
-                }`}
-              >
-                {p.name}
-              </button>
-            );
-          })}
-        </div>
+        {isModal ? (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {PROVIDER_PRESETS.map((p) => {
+              const active = provider === p.id;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => applyPreset(p.id)}
+                  title={p.desc}
+                  aria-pressed={active}
+                  className={`flex min-h-[58px] min-w-0 items-center justify-between gap-2 rounded-control border px-3 py-2 text-left transition active:scale-[0.98] ${
+                    active
+                      ? "border-accent/40 bg-accent/10 text-accent ring-2 ring-accent/10"
+                      : "border-line bg-surface text-fg-muted hover:border-line-strong hover:text-fg"
+                  }`}
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate text-xs font-semibold">
+                      {p.name}
+                    </span>
+                    <span className="mt-1 block truncate text-[10px] font-normal opacity-65">
+                      {p.model}
+                    </span>
+                  </span>
+                  {active && (
+                    <svg
+                      className="h-4 w-4 shrink-0"
+                      viewBox="0 0 20 20"
+                      fill="currentColor"
+                      aria-hidden="true"
+                    >
+                      <path
+                        fillRule="evenodd"
+                        d="M16.704 5.29a1 1 0 0 1 .006 1.414l-7.07 7.13a1 1 0 0 1-1.42.006l-3.93-3.87a1 1 0 1 1 1.404-1.426l3.22 3.17 6.376-6.43a1 1 0 0 1 1.414.006Z"
+                        clipRule="evenodd"
+                      />
+                    </svg>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          /* 设置页内嵌：收成一个下拉，避免一排厂商胶囊刷屏 */
+          <select
+            value={provider || ""}
+            onChange={(e) =>
+              e.target.value &&
+              applyPreset(e.target.value as Parameters<typeof applyPreset>[0])
+            }
+            className={inputCls}
+            aria-label="预设厂商"
+          >
+            <option value="">选择预设厂商（可选）…</option>
+            {PROVIDER_PRESETS.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name} · {p.model}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
 
       <div className="space-y-2">
         <div>
           {isModal && (
-            <label className="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400">
+            <label className="mb-1 block text-xs font-medium text-fg-muted">
               接口地址（留空使用默认）
             </label>
           )}
@@ -177,7 +220,7 @@ export function LocalApiForm({
         </div>
         <div>
           {isModal && (
-            <label className="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400">
+            <label className="mb-1 block text-xs font-medium text-fg-muted">
               API Key（留空使用默认）
             </label>
           )}
@@ -191,7 +234,7 @@ export function LocalApiForm({
             />
             <button
               onClick={() => setShowKey((v) => !v)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-gray-400 transition hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-control p-1.5 text-fg-muted transition hover:bg-sunken hover:text-fg"
               aria-label={showKey ? "隐藏密钥" : "显示密钥"}
               title={showKey ? "隐藏密钥" : "显示密钥"}
             >
@@ -234,11 +277,11 @@ export function LocalApiForm({
         </div>
         <div>
           {isModal && (
-            <label className="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400">
+            <label className="mb-1 block text-xs font-medium text-fg-muted">
               模型（留空使用默认）
             </label>
           )}
-          <div className="flex gap-1.5">
+          <div className="flex flex-col gap-1.5 sm:flex-row">
             <input
               value={cfg.model}
               onChange={(e) => setCfg({ ...cfg, model: e.target.value })}
@@ -251,7 +294,7 @@ export function LocalApiForm({
               onClick={fetchModels}
               disabled={modelFetchState === "loading"}
               title="调用 /models 接口自动拉取该服务商可用模型"
-              className="shrink-0 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-600 transition hover:border-gray-400 disabled:opacity-60 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-gray-500"
+              className={`${btnSoft} min-h-9 shrink-0 px-3 py-2 text-xs`}
             >
               {modelFetchState === "loading" ? (
                 <svg
@@ -290,9 +333,7 @@ export function LocalApiForm({
           {fetchResult && (
             <p
               className={`mt-1 flex items-center gap-1.5 text-[11px] leading-relaxed ${
-                fetchResult.ok
-                  ? "text-green-600 dark:text-green-400"
-                  : "text-red-500 dark:text-red-400"
+                fetchResult.ok ? "text-accent" : "text-danger"
               }`}
             >
               {fetchResult.ok ? "✓" : "✗"}
@@ -300,7 +341,7 @@ export function LocalApiForm({
             </p>
           )}
           {fetchedModels.length > 0 && (
-            <div className="mt-1.5 max-h-28 space-y-1 overflow-y-auto pr-1">
+            <div className="mt-1.5 max-h-40 overflow-y-auto overscroll-contain pr-1">
               <div className="flex flex-wrap gap-1">
                 {fetchedModels.map((m) => {
                   const chosen = cfg.model === m;
@@ -310,10 +351,10 @@ export function LocalApiForm({
                       type="button"
                       onClick={() => setCfg({ ...cfg, model: m })}
                       title={m}
-                      className={`max-w-full truncate rounded-full border px-2 py-0.5 text-[10px] transition active:scale-95 ${
+                      className={`max-w-full cursor-pointer truncate rounded-full border px-2.5 py-1 text-[11px] transition active:scale-[0.98] ${
                         chosen
-                          ? "border-indigo-500 bg-indigo-500 text-white"
-                          : "border-gray-200 bg-gray-50 text-gray-600 hover:border-indigo-400 hover:text-indigo-600 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-indigo-500 dark:hover:text-indigo-300"
+                          ? "border-accent/40 bg-accent/10 text-accent"
+                          : "border-line bg-surface text-fg-muted hover:border-line-strong hover:text-fg"
                       }`}
                     >
                       {m}
@@ -330,9 +371,7 @@ export function LocalApiForm({
       {testResult && (
         <p
           className={`flex items-center gap-1.5 text-[11px] leading-relaxed ${
-            testResult.ok
-              ? "text-green-600 dark:text-green-400"
-              : "text-red-500 dark:text-red-400"
+            testResult.ok ? "text-accent" : "text-danger"
           }`}
         >
           {testResult.ok ? "✓" : "✗"}
@@ -345,17 +384,14 @@ export function LocalApiForm({
       )}
 
       {isModal ? (
-        <div className="flex items-center justify-between border-t border-gray-100 px-4 py-3 dark:border-gray-700">
-          <button
-            onClick={clear}
-            className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-500 transition hover:bg-gray-50 dark:border-gray-700 dark:text-gray-400"
-          >
+        <div className="flex items-center justify-between gap-2 border-t border-line px-4 py-3">
+          <button onClick={clear} className={btnSoft}>
             清除本地配置
           </button>
           <button
             onClick={saveAndTest}
             disabled={testState === "loading"}
-            className="rounded-xl bg-gray-900 px-5 py-2 text-sm font-medium text-white transition hover:bg-gray-700 disabled:opacity-60 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
+            className={btnPrimary}
           >
             {testState === "loading" ? (
               <span className="inline-flex items-center gap-1.5">
@@ -390,7 +426,7 @@ export function LocalApiForm({
           <button
             onClick={saveAndTest}
             disabled={testState === "loading"}
-            className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-gray-900 px-3 py-2 text-sm font-medium text-white transition hover:bg-gray-700 disabled:opacity-60 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
+            className={`w-full ${btnPrimary}`}
           >
             {testState === "loading" ? (
               <span className="inline-flex items-center gap-1.5">
@@ -420,7 +456,7 @@ export function LocalApiForm({
             )}
           </button>
           {showEnabledHint && (
-            <p className="text-[11px] text-indigo-500 dark:text-indigo-400">
+            <p className="text-[11px] text-accent">
               自定义 API 已启用（次数/冷却限制已解除）
             </p>
           )}

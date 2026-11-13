@@ -19,19 +19,16 @@ export function LocalApiModal({
   if (!open) return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-[95] flex items-center justify-center p-4">
-      <div
-        className="absolute inset-0 bg-black/40 backdrop-blur-sm"
-        onClick={onClose}
-      />
-      <div className="relative w-full max-w-md rounded-3xl border border-gray-200 bg-white shadow-2xl dark:border-gray-700 dark:bg-gray-900">
-        <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3 dark:border-gray-700">
-          <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+    <div className="fixed inset-0 z-[95] flex items-end justify-center sm:items-center sm:p-4">
+      <div className="absolute inset-0 bg-black/30" onClick={onClose} />
+      <div className="relative flex max-h-[92dvh] w-full max-w-md flex-col overflow-hidden rounded-t-sheet border border-line bg-surface sm:max-h-[85dvh] sm:rounded-sheet sm:shadow-[0_24px_64px_-24px_rgba(0,0,0,0.35)]">
+        <div className="flex shrink-0 items-center justify-between border-b border-line px-4 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))] sm:pt-3">
+          <h3 className="text-base font-semibold text-fg">
             自定义模型 · {botName}
           </h3>
           <button
             onClick={onClose}
-            className="grid h-9 w-9 place-items-center rounded-full text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800"
+            className="grid h-9 w-9 cursor-pointer place-items-center rounded-control text-fg-muted transition hover:bg-sunken hover:text-fg"
             aria-label="关闭"
           >
             <svg
@@ -46,11 +43,11 @@ export function LocalApiModal({
           </button>
         </div>
 
-        <div className="space-y-3 p-4">
-          <p className="rounded-xl bg-amber-50 p-3 text-xs leading-relaxed text-amber-700 dark:bg-amber-900/20 dark:text-amber-400">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-4 pb-safe">
+          <p className="rounded-control bg-amber-50 p-3 text-xs leading-relaxed text-amber-700 dark:bg-amber-900/20 dark:text-amber-400">
             <span className="font-medium">安全与使用规则</span>
           </p>
-          <ul className="ml-5 list-disc space-y-1 rounded-xl bg-gray-50 p-3 text-xs leading-relaxed text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+          <ul className="ml-5 list-disc space-y-1 rounded-control bg-sunken p-3 text-xs leading-relaxed text-fg-muted dark:text-fg-muted">
             <li>
               API Key 与提示词<b>仅保存在本机浏览器</b>
               （localStorage），不会上传服务器，请勿在公共电脑保存。

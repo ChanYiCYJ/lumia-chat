@@ -42,6 +42,8 @@ export interface Live2dCoreState {
 }
 
 const RUNTIME_SCRIPTS = ["/lib/live2dcubismcore.min.js", "/lib/live2d.min.js"];
+const RUNTIME_LOAD_TIMEOUT_MS = 20_000;
+const MODEL_LOAD_TIMEOUT_MS = 30_000;
 
 const TRANSPARENT_PNG_DATA_URL =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9p7fJ4sAAAAASUVORK5CYII=";
@@ -53,6 +55,7 @@ let canvas: HTMLCanvasElement | null = null;
 let attachedEl: HTMLElement | null = null;
 let engineCache: { PIXI: any; Live2DModel: any } | null = null;
 let runtimePromise: Promise<void> | null = null;
+let modelLoadId = 0;
 let state: Live2dCoreState = {
   status: "idle",
   emotion: "neutral",
@@ -145,20 +148,37 @@ function loadScript(src: string): Promise<void> {
     s.src = src;
     s.dataset.live2dSrc = src;
     s.async = true;
-    s.onload = () => resolve();
-    s.onerror = () => reject(new Error(`Live2D 运行时加载失败: ${src}`));
+    const timer = window.setTimeout(() => {
+      s.remove();
+      reject(new Error(`Live2D 运行时加载超时: ${src}`));
+    }, RUNTIME_LOAD_TIMEOUT_MS);
+    s.onload = () => {
+      window.clearTimeout(timer);
+      resolve();
+    };
+    s.onerror = () => {
+      window.clearTimeout(timer);
+      s.remove();
+      reject(new Error(`Live2D 运行时加载失败: ${src}`));
+    };
     document.head.appendChild(s);
   });
 }
 
 async function ensureRuntime(): Promise<void> {
   if (runtimePromise) return runtimePromise;
-  runtimePromise = (async () => {
+  const pending = (async () => {
     for (const src of RUNTIME_SCRIPTS) {
       await loadScript(src);
     }
   })();
-  return runtimePromise;
+  runtimePromise = pending;
+  try {
+    await pending;
+  } catch (error) {
+    if (runtimePromise === pending) runtimePromise = null;
+    throw error;
+  }
 }
 
 async function ensureEngine(): Promise<{ PIXI: any; Live2DModel: any }> {
@@ -276,6 +296,12 @@ function playEmotionMotion(emotion: Emotion): boolean {
   const candidates = (EMOTION_MOTIONS[emotion] || []).filter((n) =>
     names.has(n),
   );
+  if (!candidates.length) {
+    // 模型没有该情绪动作时，至少播 idle，避免「表情变了但人不动」
+    const idle = (EMOTION_MOTIONS.neutral || []).filter((n) => names.has(n));
+    if (idle.length)
+      candidates.push(idle[Math.floor(Math.random() * idle.length)]);
+  }
   if (!candidates.length || typeof model.motion !== "function") return false;
   // 从可用动作里随机选一个：同一种情绪每次动作不同，避免"只会一个动作"
   const a = candidates[Math.floor(Math.random() * candidates.length)];
@@ -404,7 +430,16 @@ export async function loadModel(name: string): Promise<void> {
   if (!clean) return;
   if (state.status === "loading") return; // 防并发重复
   if (state.status === "ready" && state.modelName === clean) return; // 幂等
+  const loadId = ++modelLoadId;
   setState({ status: "loading", error: undefined, modelName: clean });
+  const timeout = window.setTimeout(() => {
+    if (loadId !== modelLoadId) return;
+    modelLoadId += 1;
+    setState({
+      status: "error",
+      error: "角色加载超时，请检查网络后重试",
+    });
+  }, MODEL_LOAD_TIMEOUT_MS);
   availableParams = null;
   motionNames = null;
   stopAmbient();
@@ -416,15 +451,18 @@ export async function loadModel(name: string): Promise<void> {
   modelBaseH = 1;
   try {
     const { PIXI, Live2DModel } = await ensureEngine();
+    if (loadId !== modelLoadId) return;
     // 第三方 model.json/model3.json 网址 → 走第三方加载；否则 bestdori 模型名
     const settings = /^https?:\/\//i.test(clean)
       ? await fetchThirdPartyModelSafe(clean)
       : buildLive2dSettings(clean, await fetchBuildData(clean));
+    if (loadId !== modelLoadId) return;
 
     // 纹理 404 探测 → 透明 PNG 兜底（防破图）
     const checks = await Promise.all(
       (settings.textures || []).map((u) => canLoadImage(u)),
     );
+    if (loadId !== modelLoadId) return;
     let firstValid = TRANSPARENT_PNG_DATA_URL;
     const idx = checks.findIndex(Boolean);
     if (idx >= 0) firstValid = settings.textures[idx];
@@ -474,6 +512,10 @@ export async function loadModel(name: string): Promise<void> {
     // 旧模型淡出（不“啪”地消失），新模型就绪后再淡入 → 交叉淡化，无突兀空窗
     fadeOutOldModel();
     const m = await Live2DModel.from(settings);
+    if (loadId !== modelLoadId) {
+      m.destroy({ texture: false, baseTexture: false });
+      return;
+    }
     model = m;
     // 新模型未 hook 过 internalModel.update：下次朗读时重新 hook（旧模型的 hook 随其销毁失效）
     lipSyncUpdateHooked = false;
@@ -543,10 +585,14 @@ export async function loadModel(name: string): Promise<void> {
     startAmbient();
     if (state.emotion !== "neutral") setEmotion(state.emotion);
   } catch (e) {
-    setState({
-      status: "error",
-      error: e instanceof Error ? e.message : "模型加载失败",
-    });
+    if (loadId === modelLoadId) {
+      setState({
+        status: "error",
+        error: e instanceof Error ? e.message : "模型加载失败",
+      });
+    }
+  } finally {
+    window.clearTimeout(timeout);
   }
 }
 
@@ -1205,8 +1251,16 @@ function paramExists(core: any, id: string): boolean {
 /** 执行 AI 回复里的动作指令（参数/动作/表情预设），无指令则什么都不做 */
 export function applyActionCommands(text: string): void {
   const cmds = parseActionCommands(text);
-  if (!cmds.params.length && !cmds.motion && !cmds.expression && !cmds.look)
+  if (
+    !cmds.params.length &&
+    !cmds.motion &&
+    !cmds.expression &&
+    !cmds.emotion &&
+    !cmds.look
+  )
     return;
+  // 情绪：走统一预设（参数表情 + 模型动作）
+  if (cmds.emotion) setEmotion(cmds.emotion);
   // 动作：只播模型真实存在的动作（FORCE 优先级，不被 ambient 打断）
   if (cmds.motion && motionNames?.has(cmds.motion) && model?.motion) {
     try {

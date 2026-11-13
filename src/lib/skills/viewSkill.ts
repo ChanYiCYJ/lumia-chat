@@ -18,9 +18,11 @@ export function viewSection(ctx: SkillContext): SkillSection {
     id: "view",
     text: cap
       ? `\n\n【当前浏览文章】以下是 View 面板中当前生成的综合文章，用户可能会基于它继续提问、总结或要求优化。请以它为事实基础作答；${
-          ctx.browseMode
-            ? "**当用户要求修改/优化这篇文章时，直接输出修改后的完整文章并用 [VIEW:内容] 括起（不要用 [EDIT:]），我会更新 View 面板中的文章**。"
-            : ""
+          ctx.agentNative
+            ? "**需要修改/优化这篇文章时，调用 write_artifact（传入相同 id 或相同标题）写回更新后的完整内容，不要输出 [VIEW:] 标记**。"
+            : ctx.browseMode
+              ? "**当用户要求修改/优化这篇文章时，直接输出修改后的完整文章并用 [VIEW:内容] 括起（不要用 [EDIT:]），我会更新 View 面板中的文章**。"
+              : ""
         }\n${cap}`
       : "",
   };

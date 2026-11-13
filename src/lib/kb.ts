@@ -1,10 +1,6 @@
-import { articleApi, categoryApi } from "./api";
-import type { ArticleListItem, Category } from "./types";
-
 /**
- * 知识库（KB）：可选文章/分类 + 本机浏览器自定义笔记
- * - 站点内容选择按机器人（pageId）分开保存
- * - 自定义笔记保存在本机浏览器（localStorage），任何人都可添加，不依赖账号
+ * 知识库（KB）——单一数据源 = 本机知识条目（localStorage `kimo_kb_entries`）。
+ * 条目可双向同步到 Notion（见 kbStore）；页面树的父子/排序纯函数也在本文件。
  */
 
 export interface KbNote {
@@ -14,168 +10,20 @@ export interface KbNote {
   createdAt: number;
 }
 
-export interface KbSelections {
-  articleIds: number[];
-  categoryIds: number[];
-  includeNotes: boolean;
-}
-
-export interface KbOptions {
-  articles: ArticleListItem[];
-  categories: Category[];
-}
-
 const NOTES_KEY = "kimo_kb_notes";
-const SEL_PREFIX = "kimo_kb_sel_";
 
 export function uid(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
-// ---- 本机自定义笔记（浏览器级，所有机器人共享） ----
-export function getKbNotes(): KbNote[] {
+/** 旧版「自定义笔记」存储（仅一次性迁移用；新版知识库不再读写它） */
+function readLegacyNotes(): KbNote[] {
   try {
     const r = JSON.parse(localStorage.getItem(NOTES_KEY) || "[]");
     return Array.isArray(r) ? r : [];
   } catch {
     return [];
   }
-}
-
-export function saveKbNotes(notes: KbNote[]): void {
-  try {
-    localStorage.setItem(NOTES_KEY, JSON.stringify(notes));
-  } catch {
-    /* 忽略 */
-  }
-}
-
-export function addKbNote(title: string, content: string): KbNote[] {
-  const notes = getKbNotes();
-  const note: KbNote = {
-    id: uid(),
-    title: title.trim(),
-    content: content.trim(),
-    createdAt: Date.now(),
-  };
-  notes.unshift(note);
-  saveKbNotes(notes);
-  return notes;
-}
-
-export function updateKbNote(
-  id: string,
-  title: string,
-  content: string,
-): KbNote[] {
-  const notes = getKbNotes().map((n) =>
-    n.id === id ? { ...n, title: title.trim(), content: content.trim() } : n,
-  );
-  saveKbNotes(notes);
-  return notes;
-}
-
-export function removeKbNote(id: string): KbNote[] {
-  const notes = getKbNotes().filter((n) => n.id !== id);
-  saveKbNotes(notes);
-  return notes;
-}
-
-// ---- 每个机器人的选择 ----
-export function getKbSelections(pageId: number): KbSelections {
-  try {
-    const r = JSON.parse(localStorage.getItem(SEL_PREFIX + pageId) || "");
-    if (r && Array.isArray(r.articleIds) && Array.isArray(r.categoryIds)) {
-      return {
-        articleIds: r.articleIds,
-        categoryIds: r.categoryIds,
-        includeNotes: r.includeNotes !== false,
-      };
-    }
-  } catch {
-    /* 忽略 */
-  }
-  return { articleIds: [], categoryIds: [], includeNotes: true };
-}
-
-export function saveKbSelections(pageId: number, sel: KbSelections): void {
-  try {
-    localStorage.setItem(SEL_PREFIX + pageId, JSON.stringify(sel));
-  } catch {
-    /* 忽略 */
-  }
-}
-
-// ---- 加载站点内容（翻页取全部文章） ----
-export async function loadKbOptions(): Promise<KbOptions> {
-  const [articles, categories] = await Promise.all([
-    loadAllArticles(),
-    categoryApi.list().catch(() => [] as Category[]),
-  ]);
-  return { articles, categories };
-}
-
-async function loadAllArticles(): Promise<ArticleListItem[]> {
-  const all: ArticleListItem[] = [];
-  try {
-    let page = 1;
-    for (let i = 0; i < 20; i++) {
-      const r = await articleApi.list(page);
-      all.push(...r.items);
-      if (r.items.length === 0 || all.length >= r.total || page >= r.total_page)
-        break;
-      page++;
-    }
-  } catch {
-    /* 忽略 */
-  }
-  return all;
-}
-
-// ---- 组装知识库文本（发送时调用，已缓存到 AIChat） ----
-export async function assembleKnowledge(
-  sel: KbSelections,
-  notes: KbNote[],
-): Promise<string> {
-  const parts: string[] = [];
-  const { articles, categories } = await loadKbOptions();
-
-  const selectedArticles = articles.filter((a) =>
-    sel.articleIds.includes(a.id),
-  );
-  if (selectedArticles.length) {
-    parts.push(
-      "【文章】\n" +
-        selectedArticles
-          .map(
-            (a) =>
-              `- 《${a.title}》[${a.category_name || "未分类"}]：${a.description || ""}`,
-          )
-          .join("\n"),
-    );
-  }
-
-  const selectedCategories = categories.filter((c) =>
-    sel.categoryIds.includes(c.id),
-  );
-  if (selectedCategories.length) {
-    parts.push(
-      "【分类】\n" +
-        selectedCategories.map((c) => `- ${c.name}(/${c.slug})`).join("\n"),
-    );
-  }
-
-  if (sel.includeNotes) {
-    const valid = notes.filter((n) => n.title || n.content);
-    if (valid.length) {
-      parts.push(
-        "【自定义笔记】\n" +
-          valid.map((n) => `- ${n.title}：${n.content}`).join("\n"),
-      );
-    }
-  }
-
-  return parts.join("\n\n");
 }
 
 // ---- 导出知识库为 Markdown ----
@@ -358,13 +206,79 @@ export interface KbEntryRecord {
 }
 
 const ENTRIES_KEY = "kimo_kb_entries";
+const LEGACY_PROMPTS_KEY = "kimo_agent_prompts";
 
+/** 读取知识条目（本机唯一数据源）。仅当存储键「从未存在」时，才把旧数据（角色提示词/自定义笔记）迁移过来 */
 export function loadKbEntries(): KbEntryRecord[] {
+  let raw: string | null = null;
   try {
-    const r = JSON.parse(localStorage.getItem(ENTRIES_KEY) || "[]");
-    return Array.isArray(r) ? r : [];
+    raw = localStorage.getItem(ENTRIES_KEY);
+    if (raw !== null) {
+      const r = JSON.parse(raw || "[]");
+      return Array.isArray(r) ? r : [];
+    }
   } catch {
-    return [];
+    /* 落到迁移分支 */
+  }
+  return migrateLegacyEntries();
+}
+
+/** 一次性迁移：kimo_agent_prompts + kimo_kb_notes → kimo_kb_entries（之后不再读写旧 key） */
+function migrateLegacyEntries(): KbEntryRecord[] {
+  const out: KbEntryRecord[] = [];
+  try {
+    const prompts = JSON.parse(
+      localStorage.getItem(LEGACY_PROMPTS_KEY) || "[]",
+    );
+    if (Array.isArray(prompts)) {
+      for (const p of prompts as Record<string, unknown>[]) {
+        const createdAt = Number(p.createdAt) || Date.now();
+        out.push({
+          id: "p_" + createdAt,
+          name: String(p.name || ""),
+          content: String(p.content || ""),
+          createdAt,
+        });
+      }
+    }
+  } catch {
+    /* 忽略 */
+  }
+  for (const n of readLegacyNotes()) {
+    out.push({
+      id: n.id || uid(),
+      name: n.title || "",
+      content: n.content || "",
+      createdAt: n.createdAt || Date.now(),
+    });
+  }
+  if (!out.length) return [];
+  try {
+    localStorage.setItem(ENTRIES_KEY, JSON.stringify(out));
+    localStorage.removeItem(LEGACY_PROMPTS_KEY);
+    // 迁移完成即清掉旧笔记 key，避免以后清空知识库时又被迁移回来
+    localStorage.removeItem(NOTES_KEY);
+  } catch {
+    /* 忽略 */
+  }
+  return out;
+}
+
+/** 知识条目唯一写入入口（调用方负责自身 state 更新；Notion 同步见 kbStore） */
+export function writeKbEntries(entries: KbEntryRecord[]): void {
+  try {
+    localStorage.setItem(ENTRIES_KEY, JSON.stringify(entries));
+  } catch {
+    /* 忽略 */
+  }
+  // 延后通知其他实例（桌面/移动两个 AgentPanel 同时挂载时保持列表一致）。
+  // 用 setTimeout 而非同步派发：调用点可能在 setState updater 中，同步派发会触发跨组件渲染期更新。
+  try {
+    setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("kimo:kb:entries-changed"));
+    }, 0);
+  } catch {
+    /* 非浏览器环境忽略 */
   }
 }
 
@@ -521,9 +435,84 @@ export function reparentKbEntry(
   });
 }
 
+/** 同级排序：order 优先，回退创建时间，再按名称 */
+export function kbEntrySort(a: KbEntryRecord, b: KbEntryRecord): number {
+  return (
+    (a.order ?? Number.MAX_SAFE_INTEGER) -
+      (b.order ?? Number.MAX_SAFE_INTEGER) ||
+    a.createdAt - b.createdAt ||
+    a.name.localeCompare(b.name, "zh-CN")
+  );
+}
+
+export interface KbTreeRowItem {
+  entry: KbEntryRecord;
+  depth: number;
+  hasChildren: boolean;
+}
+
+/**
+ * 构建页面树扁平行（含缩进层级 + 折叠）：AgentPanel 页面树与「/」弹窗条目列表共用。
+ * 父键用 kbParentKey（已同步=notionParentId / 未同步=parentId），父不在条目集则归顶层。
+ */
+export function buildKbTreeRows(
+  entries: KbEntryRecord[],
+  collapsed?: Set<string>,
+): KbTreeRowItem[] {
+  const childrenByParent = new Map<string, KbEntryRecord[]>();
+  const top: KbEntryRecord[] = [];
+  for (const e of entries) {
+    const pk = kbParentKey(e, entries);
+    if (pk) {
+      const arr = childrenByParent.get(pk) || [];
+      arr.push(e);
+      childrenByParent.set(pk, arr);
+    } else {
+      top.push(e);
+    }
+  }
+  top.sort(kbEntrySort);
+  for (const arr of childrenByParent.values()) arr.sort(kbEntrySort);
+  const out: KbTreeRowItem[] = [];
+  const walk = (items: KbEntryRecord[], depth: number) => {
+    for (const e of items) {
+      const kids = childrenByParent.get(e.notionId || e.id || "") || [];
+      out.push({ entry: e, depth, hasChildren: kids.length > 0 });
+      if (kids.length && !collapsed?.has(e.id)) walk(kids, depth + 1);
+    }
+  };
+  walk(top, 0);
+  return out;
+}
+
+/** 知识库注入文本（AI 对话上下文）：去重后每条约 600 字、总量 6000 字封顶 */
+export function formatKbEntriesForContext(
+  items: { title: string; content: string }[],
+  opts?: { maxChars?: number; perEntry?: number },
+): string {
+  const perEntry = opts?.perEntry ?? 600;
+  const maxChars = opts?.maxChars ?? 6000;
+  const unique = new Map<string, { title: string; content: string }>();
+  for (const n of items) {
+    if (n.content && !unique.has(n.content)) unique.set(n.content, n);
+  }
+  const valid = [...unique.values()];
+  if (!valid.length) return "";
+  const body = valid
+    .map((n) => {
+      const c =
+        n.content.length > perEntry
+          ? n.content.slice(0, perEntry) + "…"
+          : n.content;
+      return "- " + n.title + "：" + c;
+    })
+    .join("\n");
+  return ("【知识库条目】\n" + body).slice(0, maxChars);
+}
+
 /**
  * AI 创建/编辑知识库条目（按标题匹配，命中则更新，否则新建）。
- * 同步写 kimo_kb_entries 与 kimo_kb_notes，返回目标条目。
+ * 写入 kimo_kb_entries（唯一条目存储），返回目标条目。
  */
 export function saveKbEntry(title: string, content: string): KbEntryRecord {
   const entries = loadKbEntries();
@@ -540,19 +529,7 @@ export function saveKbEntry(title: string, content: string): KbEntryRecord {
     entry = { id: uid(), name: t, content, createdAt: Date.now() };
     next = [entry, ...entries];
   }
-  try {
-    localStorage.setItem(ENTRIES_KEY, JSON.stringify(next));
-  } catch {
-    /* 忽略 */
-  }
-  saveKbNotes(
-    next.map((e) => ({
-      id: e.id,
-      title: e.name,
-      content: e.content,
-      createdAt: e.createdAt,
-    })),
-  );
+  writeKbEntries(next);
   return entry;
 }
 

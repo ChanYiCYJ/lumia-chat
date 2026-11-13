@@ -2,21 +2,23 @@ import type { ReactNode } from "react";
 
 type BadgeTone = "violet" | "gray" | "blue" | "green" | "amber" | "red";
 
+/**
+ * 徽标配色：只保留语义（成功/警告/危险）+ 中性。
+ * `violet` 是为了兼容旧调用保留的 key，视觉上已收敛为中性墨色（去掉 AI 紫）。
+ */
 const TONES: Record<BadgeTone, string> = {
-  violet:
-    "bg-violet-50 text-violet-700 border-violet-200 dark:bg-violet-500/15 dark:text-violet-300 dark:border-violet-500/30",
-  gray: "bg-gray-100 text-gray-600 border-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:border-gray-700",
-  blue: "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-500/15 dark:text-blue-300 dark:border-blue-500/30",
-  green:
-    "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/15 dark:text-emerald-300 dark:border-emerald-500/30",
+  violet: "bg-sunken text-fg border-line",
+  gray: "bg-sunken text-fg-muted border-line",
+  blue: "bg-accent/8 text-accent border-accent/25",
+  green: "bg-accent/8 text-accent border-accent/25",
   amber:
-    "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/15 dark:text-amber-300 dark:border-amber-500/30",
-  red: "bg-red-50 text-red-700 border-red-200 dark:bg-red-500/15 dark:text-red-300 dark:border-red-500/30",
+    "bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-400/10 dark:text-amber-300 dark:border-amber-400/25",
+  red: "bg-danger/8 text-danger border-danger/25",
 };
 
 export function Badge({
   children,
-  tone = "violet",
+  tone = "gray",
   className = "",
 }: {
   children: ReactNode;
@@ -25,7 +27,7 @@ export function Badge({
 }) {
   return (
     <span
-      className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${TONES[tone]} ${className}`}
+      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ${TONES[tone]} ${className}`}
     >
       {children}
     </span>
@@ -46,17 +48,13 @@ export function EmptyState({
   return (
     <div className="flex flex-col items-center justify-center gap-3 py-20 text-center">
       {icon && (
-        <div className="flex h-16 w-16 items-center justify-center rounded-3xl bg-gray-100 text-gray-400 dark:bg-gray-800">
+        <div className="flex h-14 w-14 items-center justify-center rounded-card border border-line bg-sunken text-fg-muted">
           {icon}
         </div>
       )}
-      <h3 className="text-base font-medium text-gray-700 dark:text-gray-300">
-        {title}
-      </h3>
+      <h3 className="text-base font-medium text-fg">{title}</h3>
       {description && (
-        <p className="max-w-xs text-sm text-gray-400 dark:text-gray-500">
-          {description}
-        </p>
+        <p className="max-w-xs text-sm text-fg-muted">{description}</p>
       )}
       {action && <div className="mt-2">{action}</div>}
     </div>
@@ -73,24 +71,167 @@ export function Skeleton({ className = "" }: { className?: string }) {
 
 /* ===== 后台/通用共享设计 token（对齐 AI 前端精修风） ===== */
 
-/** 主按钮（黑底白字；暗色下反转为浅色，与 AI 前端一致） */
+/**
+ * 主按钮（中性描边：白底 + 深灰字 + hairline）。
+ * 不使用实心黑 —— 用户明确 dislikes「满屏黑按钮」；主次区分靠描边深浅与文字色阶。
+ */
 export const btnPrimary =
-  "flex items-center justify-center gap-1.5 rounded-xl bg-gray-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-gray-700 active:scale-[0.98] disabled:opacity-60 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300";
+  "flex cursor-pointer items-center justify-center gap-1.5 rounded-control border border-line-strong bg-surface px-4 py-2 text-sm font-medium text-fg transition hover:bg-sunken active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50";
 
-/** 幽灵按钮（细边框灰字） */
+/** 幽灵按钮（hairline 描边 + 中性文字） */
 export const ghostBtn =
-  "flex items-center justify-center gap-1.5 rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-600 transition hover:border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800";
+  "flex cursor-pointer items-center justify-center gap-1.5 rounded-control border border-line bg-surface px-3 py-2 text-sm text-fg-muted transition hover:bg-sunken hover:text-fg disabled:cursor-not-allowed disabled:opacity-50";
+
+/** 次要按钮（ghostBtn 的语义别名，供表单/弹窗底栏使用） */
+export const btnSoft = ghostBtn;
+
+/** 可点击胶囊基础样式（预设、筛选、标签），最小 32px 命中区 */
+export const chipCls =
+  "inline-flex cursor-pointer items-center justify-center rounded-full border px-3 py-1.5 text-xs font-medium transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50";
+
+/** 胶囊未选中态 */
+export const chipOff =
+  "border-line bg-surface text-fg-muted hover:border-line-strong hover:text-fg";
+
+/** 胶囊选中态（用凹陷浅灰代替实心黑） */
+export const chipOn = "border-line-strong bg-sunken text-fg";
 
 /** 输入框统一样式 */
 export const inputCls =
-  "w-full rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-800 outline-none transition placeholder:text-gray-400 focus:border-gray-400 focus:ring-2 focus:ring-gray-100 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:placeholder:text-gray-500";
+  "w-full rounded-control border border-line bg-surface px-3 py-2 text-sm text-fg outline-none transition placeholder:text-fg-muted/70 focus:border-accent focus:ring-2 focus:ring-accent/15";
 
-/** 列表操作小按钮（蓝 / 红 文字按钮） */
-export const rowBtn = "rounded-lg px-3 py-1.5 text-xs font-medium transition";
+/** 列表操作小按钮（文字按钮） */
+export const rowBtn =
+  "cursor-pointer rounded-[8px] px-2.5 py-1 text-xs font-medium transition";
 
 /** 列表操作带边框按钮 */
 export const rowBtnBorder =
-  "rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-600 transition hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800";
+  "cursor-pointer rounded-[8px] border border-line bg-surface px-2.5 py-1 text-xs text-fg-muted transition hover:bg-sunken hover:text-fg";
+
+/** 卡片容器（surface + hairline，无阴影） */
+export const cardCls = "rounded-card border border-line bg-surface";
+
+/** 表单字段：标签 + 控件 + 可选说明 */
+export function Field({
+  label,
+  hint,
+  htmlFor,
+  children,
+}: {
+  label: ReactNode;
+  hint?: ReactNode;
+  htmlFor?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <label
+        htmlFor={htmlFor}
+        className="block text-xs font-medium text-fg-muted"
+      >
+        {label}
+      </label>
+      {children}
+      {hint && (
+        <p className="text-[11px] leading-relaxed text-fg-muted">{hint}</p>
+      )}
+    </div>
+  );
+}
+
+/** 分段单选（等价于原生 radio，键盘可用） */
+export function SegmentedControl<T extends string>({
+  value,
+  options,
+  onChange,
+  label,
+}: {
+  value: T;
+  options: { value: T; label: string }[];
+  onChange: (v: T) => void;
+  label?: string;
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label={label}
+      className="flex gap-0.5 rounded-control border border-line bg-sunken p-0.5"
+    >
+      {options.map((o) => {
+        const active = o.value === value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            onClick={() => onChange(o.value)}
+            className={`flex min-h-9 flex-1 cursor-pointer items-center justify-center rounded-[8px] px-3 py-1.5 text-[13px] font-medium transition ${
+              active
+                ? "bg-surface text-fg shadow-[0_1px_0_rgba(0,0,0,0.04)] dark:shadow-none"
+                : "text-fg-muted hover:text-fg"
+            }`}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** 图标按钮（36px 命中区，选中态用 sunken） */
+export function IconButton({
+  label,
+  onClick,
+  active = false,
+  disabled = false,
+  className = "",
+  children,
+}: {
+  label: string;
+  onClick?: () => void;
+  active?: boolean;
+  disabled?: boolean;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      title={label}
+      aria-pressed={active || undefined}
+      className={`grid h-9 w-9 shrink-0 cursor-pointer place-items-center rounded-control border transition active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40 ${
+        active
+          ? "border-line-strong bg-sunken text-fg"
+          : "border-transparent text-fg-muted hover:bg-sunken hover:text-fg"
+      } ${className}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** 分区标题（11px 大写字距，替代彩色图标标题） */
+export function SectionTitle({
+  children,
+  right,
+}: {
+  children: ReactNode;
+  right?: ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <h3 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-fg-muted">
+        {children}
+      </h3>
+      {right}
+    </div>
+  );
+}
 
 /** 后台页头：标题 + 副标题 + 右侧主操作按钮 */
 export function PageHeader({
@@ -165,19 +306,17 @@ export function Switch({
   return (
     <button
       onClick={() => onChange(!on)}
-      className="flex w-full items-center justify-between gap-3 py-1.5 text-left"
+      className="flex w-full cursor-pointer items-center justify-between gap-3 py-1.5 text-left"
       role="switch"
       aria-checked={on}
     >
       {(label || sub) && (
         <span className="min-w-0">
           {label && (
-            <span className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-              {label}
-            </span>
+            <span className="block text-sm font-medium text-fg">{label}</span>
           )}
           {sub && (
-            <span className="mt-0.5 block text-[11px] leading-relaxed text-gray-400 dark:text-gray-500">
+            <span className="mt-0.5 block text-[11px] leading-relaxed text-fg-muted">
               {sub}
             </span>
           )}
@@ -185,11 +324,11 @@ export function Switch({
       )}
       <span
         className={`relative h-5 w-9 shrink-0 rounded-full transition ${
-          on ? "bg-gray-900 dark:bg-gray-200" : "bg-gray-300 dark:bg-gray-700"
+          on ? "bg-accent" : "bg-line-strong"
         }`}
       >
         <span
-          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${
+          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-all ${
             on ? "left-[18px]" : "left-0.5"
           }`}
         />

@@ -2,6 +2,40 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* ===== 设计 token（Swiss 极简 · 纸感中性 · 单一强调色）=====
+   参考 ui-ux-pro-max：minimalism-and-swiss-style + swiss-modernism-2-0，
+   控制件语义参考 apple-native-experience；排除 AI-Native 紫/渐变/发光。
+   约定：页面用 bg，卡片用 surface，凹陷/选中用 sunken，描边用 line，
+   文字 fg / fg-muted，强调色 accent 仅用于链接、focus、选中态。 */
+@theme {
+  --color-bg: #fafaf8;
+  --color-surface: #ffffff;
+  --color-sunken: #f3f3f0;
+  --color-line: #e4e2dd;
+  --color-line-strong: #d6d3cc;
+  --color-fg: #17181a;
+  --color-fg-muted: #6b6b66;
+  --color-accent: #2f6f5e;
+  --color-danger: #b3261e;
+
+  --radius-control: 10px;
+  --radius-card: 14px;
+  --radius-sheet: 16px;
+}
+
+/* 暗色 token：覆盖同名变量，Tailwind utilities 通过 var() 自动跟随 */
+.dark {
+  --color-bg: #0e0f0f;
+  --color-surface: #161718;
+  --color-sunken: #1d1f20;
+  --color-line: #2a2c2d;
+  --color-line-strong: #3a3d3e;
+  --color-fg: #ececea;
+  --color-fg-muted: #9a9b97;
+  --color-accent: #6fae9b;
+  --color-danger: #e2665c;
+}
+
 :root {
   --card-radius: 1rem;
   --max-article-width: 72ch;
@@ -19,6 +53,19 @@ html {
 .no-scrollbar {
   -ms-overflow-style: none;
   scrollbar-width: none;
+}
+
+/* ===== 安全区工具类（刘海 / 底部 Home 指示条）=====
+   index.html 已声明 viewport-fit=cover，必须自己补内边距，
+   否则手机同意页标题会被状态栏压住、底栏按钮会被指示条盖住。 */
+.pt-safe {
+  padding-top: max(1rem, env(safe-area-inset-top));
+}
+.pb-safe {
+  padding-bottom: calc(env(safe-area-inset-bottom) + 0.75rem);
+}
+.pb-safe-lg {
+  padding-bottom: calc(env(safe-area-inset-bottom) + 1.25rem);
 }
 
 /* 内容淡入（AI 对话消息等，配合 animate-[kfade_...] 使用） */
@@ -86,17 +133,25 @@ html {
 }
 
 body {
-  font-family: "Noto Serif SC", "SimSun", "宋体", serif;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "PingFang SC",
+    "Microsoft YaHei",
+    sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  color: #1f2937;
-  background-color: #f3f4f6;
+  font-feature-settings: "tnum" 1;
+  color: var(--color-fg);
+  background-color: var(--color-bg);
 }
 
 /* ===== 暗色模式 ===== */
 .dark body {
-  color: #d1d5db;
-  background-color: #111827;
+  color: var(--color-fg);
+  background-color: var(--color-bg);
 }
 
 .dark .bg-fixed-cover {
@@ -182,18 +237,13 @@ body {
 }
 
 .dark .card {
-  background: rgba(31, 41, 55, 0.85);
-  border-color: rgba(55, 65, 81, 0.6);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.2),
-    0 4px 16px -8px rgba(0, 0, 0, 0.3);
+  background: var(--color-surface);
+  border-color: var(--color-line);
 }
 
 .dark .card-hover:hover {
-  box-shadow:
-    0 4px 6px rgba(0, 0, 0, 0.3),
-    0 16px 32px -12px rgba(0, 0, 0, 0.4);
-  border-color: #4b5563;
+  border-color: var(--color-line-strong);
+  background: var(--color-sunken);
 }
 
 /* ===== 背景（原项目：Bing 背景图 + 白色模糊遮罩） ===== */
@@ -217,28 +267,19 @@ body {
   -webkit-backdrop-filter: blur(10px);
 }
 
-/* ===== 卡片（原项目：bg-white/80 backdrop-blur rounded-3xl shadow-sm） ===== */
+/* ===== 卡片（surface + hairline，无模糊无阴影） ===== */
 .card {
-  background: rgba(255, 255, 255, 0.8);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  border: 1px solid rgba(243, 244, 246, 1);
-  border-radius: var(--card-radius);
-  box-shadow:
-    0 1px 2px rgba(16, 24, 40, 0.04),
-    0 4px 16px -8px rgba(16, 24, 40, 0.06);
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-card);
   transition:
-    transform 0.2s ease,
-    box-shadow 0.2s ease,
-    border-color 0.2s ease;
+    background-color 0.15s ease,
+    border-color 0.15s ease;
 }
 
 .card-hover:hover {
-  transform: translateY(-2px);
-  box-shadow:
-    0 4px 6px rgba(16, 24, 40, 0.05),
-    0 16px 32px -12px rgba(16, 24, 40, 0.12);
-  border-color: #e5e7eb;
+  border-color: var(--color-line-strong);
+  background: var(--color-sunken);
 }
 
 /* ===== 分类 / 标签 徽标（原项目：text-primary bg-primary/10 rounded-full） ===== */
@@ -1092,30 +1133,51 @@ body {
   display: flex;
   flex: none;
   align-items: center;
-  gap: 4px;
-  min-height: 32px;
-  border-radius: 8px;
+  gap: 5px;
+  min-height: 34px;
+  margin: 1px 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
   padding-right: 6px;
   color: #374151;
   cursor: default;
-  transition: background 0.12s;
+  transition:
+    background 0.12s,
+    border-color 0.12s;
 }
 .kimo-kb-tree-row:hover {
   background: #f3f4f6;
+  border-color: #e5e7eb;
 }
 .dark .kimo-kb-tree-row {
   color: #d1d5db;
 }
 .dark .kimo-kb-tree-row:hover {
   background: #1f2937;
+  border-color: #374151;
 }
 .kimo-kb-tree-row.active {
   background: #eef2ff;
+  border-color: rgba(99, 102, 241, 0.28);
   color: #4338ca;
+}
+.kimo-kb-tree-row.active::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 999px;
+  background: #6366f1;
 }
 .dark .kimo-kb-tree-row.active {
   background: rgba(99, 102, 241, 0.18);
+  border-color: rgba(129, 140, 248, 0.35);
   color: #c7d2fe;
+}
+.dark .kimo-kb-tree-row.active::before {
+  background: #a5b4fc;
 }
 /* 拖拽落点指示 */
 .kimo-kb-tree-row.drop-before {
@@ -1209,16 +1271,18 @@ body {
   background: #111827;
   color: #f3f4f6;
 }
-/* 悬停工具栏 */
+/* 行尾操作（只有一个 ⋯；新建子页/重命名/删除都在菜单里）
+   常态低透明度常显，保证触屏（无 hover）也能打开菜单；悬停/聚焦时高亮 */
 .kimo-kb-tree-actions {
   display: flex;
   flex: none;
   align-items: center;
   gap: 1px;
-  opacity: 0;
+  opacity: 0.35;
   transition: opacity 0.12s;
 }
-.kimo-kb-tree-row:hover .kimo-kb-tree-actions {
+.kimo-kb-tree-row:hover .kimo-kb-tree-actions,
+.kimo-kb-tree-actions:focus-within {
   opacity: 1;
 }
 .kimo-kb-tree-act {

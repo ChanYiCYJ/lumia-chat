@@ -1,8 +1,8 @@
 /**
  * Notion 式页面树（知识库）。
  * - 缩进嵌套 + 折叠 / 展开（chevron）
- * - 悬停工具栏：＋ 新建子页 / ⋯ 菜单（重命名 / 恢复自动标题 / 删除）
- * - 拖拽（抓柄 ⠿）：
+ * - 行尾单个 ⋯ 菜单：新建子页 / 重命名 / 恢复自动标题 / 删除
+ * - 拖拽（抓柄 ⠿，悬停显示）：
  *   - 同父行上 1/3 / 下 1/3 → before / after 精确重排（本地 order）
  *   - 行中间 或 跨级行上 → 变为该页的子页（改父，Notion 侧「重建+删旧」）
  *   - 拖到树顶部条 → 移到顶层
@@ -10,13 +10,14 @@
  */
 import { useMemo, useState, useEffect, useRef } from "react";
 import { type DragEvent, type KeyboardEvent, type ReactNode } from "react";
-import { kbParentKey, type KbEntryRecord } from "../lib/kb";
+import {
+  kbParentKey,
+  buildKbTreeRows,
+  kbEntrySort,
+  type KbEntryRecord,
+} from "../lib/kb";
 
-export interface KbPageTreeRow {
-  entry: KbEntryRecord;
-  depth: number;
-  hasChildren: boolean;
-}
+export type KbPageTreeRow = ReturnType<typeof buildKbTreeRows>[number];
 
 type DropPos =
   | { type: "row"; id: string; pos: "before" | "after" | "child" }
@@ -29,7 +30,7 @@ export interface KbPageTreeProps {
   onToggleCollapse?: (id: string) => void;
   /** 点击页面名 → 打开编辑 */
   onOpen: (entry: KbEntryRecord) => void;
-  /** 悬停 ＋ → 新建子页 */
+  /** 悬停 ⋯ → 新建子页 */
   onNewChild: (entry: KbEntryRecord) => void;
   /** 重命名（提交后由上层锁定标题并同步 Notion） */
   onRename: (id: string, name: string) => void;
@@ -62,41 +63,14 @@ export function KbPageTree({
   movingId,
   empty,
 }: KbPageTreeProps) {
-  // 排序：order 优先，回退 createdAt
-  const sortFn = (a: KbEntryRecord, b: KbEntryRecord) =>
-    (a.order ?? Number.MAX_SAFE_INTEGER) -
-      (b.order ?? Number.MAX_SAFE_INTEGER) ||
-    a.createdAt - b.createdAt ||
-    a.name.localeCompare(b.name, "zh-CN");
+  // 排序：order 优先，回退 createdAt（与 kb.ts 共用同一规则）
+  const sortFn = kbEntrySort;
 
-  // 构建扁平行（depth + 折叠）
-  const rows = useMemo<KbPageTreeRow[]>(() => {
-    const childrenByParent = new Map<string, KbEntryRecord[]>();
-    const top: KbEntryRecord[] = [];
-    for (const e of entries) {
-      const pk = kbParentKey(e, entries);
-      if (pk) {
-        const arr = childrenByParent.get(pk) || [];
-        arr.push(e);
-        childrenByParent.set(pk, arr);
-      } else {
-        top.push(e);
-      }
-    }
-    top.sort(sortFn);
-    for (const arr of childrenByParent.values()) arr.sort(sortFn);
-    const out: KbPageTreeRow[] = [];
-    const walk = (items: KbEntryRecord[], depth: number) => {
-      for (const e of items) {
-        const kids = childrenByParent.get(e.notionId || e.id || "") || [];
-        out.push({ entry: e, depth, hasChildren: kids.length > 0 });
-        if (kids.length && !collapsed?.has(e.id)) walk(kids, depth + 1);
-      }
-    };
-    walk(top, 0);
-    return out;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entries, collapsed]);
+  // 构建扁平行（depth + 折叠）：与「/」弹窗条目列表共用 buildKbTreeRows
+  const rows = useMemo<KbPageTreeRow[]>(
+    () => buildKbTreeRows(entries, collapsed),
+    [entries, collapsed],
+  );
 
   /** 某父组下全部条目 id（按当前顺序） */
   const groupOrderedIds = (parentKey: string): string[] =>
@@ -384,29 +358,12 @@ export function KbPageTree({
                 </span>
               )}
 
-              {/* 悬停工具栏 */}
+              {/* 行尾操作：单个 ⋯（新建子页/重命名/删除都在菜单里，减少行内按钮拥挤） */}
               <span className="kimo-kb-tree-actions">
                 <button
                   className="kimo-kb-tree-act"
-                  title="新建子页面"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onNewChild(row.entry);
-                  }}
-                >
-                  <svg
-                    className="h-3 w-3"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                  >
-                    <path strokeLinecap="round" d="M12 5v14M5 12h14" />
-                  </svg>
-                </button>
-                <button
-                  className="kimo-kb-tree-act"
                   title="更多操作"
+                  aria-label="更多操作"
                   onClick={(e) => {
                     e.stopPropagation();
                     setMenuId(menuId === row.entry.id ? null : row.entry.id);
@@ -427,6 +384,14 @@ export function KbPageTree({
               {/* ⋯ 菜单 */}
               {menuId === row.entry.id && (
                 <div className="kimo-kb-tree-menu">
+                  <button
+                    onClick={() => {
+                      setMenuId(null);
+                      onNewChild(row.entry);
+                    }}
+                  >
+                    新建子页面
+                  </button>
                   <button onClick={() => startRename(row.entry)}>重命名</button>
                   {row.entry.titleLocked && (
                     <button

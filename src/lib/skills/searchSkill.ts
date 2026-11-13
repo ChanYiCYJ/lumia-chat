@@ -18,6 +18,19 @@ export function webSection(ctx: SkillContext): SkillSection {
  */
 export function modeSection(ctx: SkillContext): SkillSection {
   let text = "";
+  if (ctx.agentNative) {
+    if (ctx.fastMode) {
+      text =
+        "\n\n【快速模式 Fast】当前为纯本地快速模式：直接基于你自己的知识、对话记忆与本地知识库简洁回答。**不要调用联网工具**（web_search / fetch_page / generate_article），也不要输出任何工具标记；若问题需要实时/最新信息或你完全不了解，请如实说明当前无法联网，并建议用户切换到 Auto（适当联网）或 Deep（生成完整文章）模式。";
+    } else if (ctx.autoMode) {
+      text =
+        "\n\n【智能模式 Auto】当前为智能模式：默认直接基于你的知识简洁回答（不需要联网就绝不联网）。当你没有准确、可靠或最新的数据时，必须主动升级联网：调用 web_search（多语言混合关键词：保留用户原语言 + 英文翻译；技术类加 official/documentation/github；新闻类带日期年份），拿到结果后基于结果准确回答并注明来源。完整综合文章（长篇盘点/攻略/评测）仅限 Deep 模式：当前不要生成完整文章。";
+    } else if (ctx.browseMode) {
+      text =
+        "\n\n【联网搜索模式】需要外部/最新/不熟悉的信息时：调用 generate_article 生成综合文章（正文会进入本会话产物面板），或先用 web_search 检索核实。调用工具前后用 1-2 句自然、符合人设的短句引导用户，不要自己展开长篇回答；不需要联网的问题（寒暄、写代码、常识）正常简短回答。";
+    }
+    return { id: "mode", text };
+  }
   if (ctx.fastMode) {
     text =
       "\n\n【快速模式 Fast】当前为纯本地快速模式：请直接基于你自己的知识、对话记忆与本地知识库快速、简洁地回答（能答就答，简洁优先）。**不要联网搜索、不要生成文章**：不要输出 [SEARCH:] / [BROWSE:] / [VIEW:] 等任何网络工具指令；若问题需要实时/最新信息或你完全不了解，请如实说明当前无法联网查询，并建议用户切换到 Auto（适当联网）或 Deep（生成完整文章）模式。";

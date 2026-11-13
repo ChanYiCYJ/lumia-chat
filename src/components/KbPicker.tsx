@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo, useCallback, memo } from "react";
 import { createPortal } from "react-dom";
 import { NotionIcon } from "./ui";
+import { loadKbEntries, buildKbTreeRows } from "../lib/kb";
 
 interface KbNote {
   id: string;
@@ -9,8 +10,6 @@ interface KbNote {
   createdAt: number;
   /** 已同步 Notion 页面 id（有则显示 Notion 图标） */
   notionId?: string;
-  /** 父页面 id（子页面有值；用于层级缩进展示） */
-  notionParentId?: string;
 }
 
 /** 展开列表默认渲染上限（超出用「展开全部」按需扩量，避免 100+ 条时全量渲染卡顿） */
@@ -41,14 +40,12 @@ const KbRow = memo(function KbRow({
       <span
         className={
           "grid h-4 w-4 shrink-0 place-items-center rounded border transition " +
-          (checked
-            ? "border-gray-900 bg-gray-900 dark:border-gray-200 dark:bg-gray-200"
-            : "border-gray-300 dark:border-gray-600")
+          (checked ? "border-accent bg-accent" : "border-line-strong")
         }
       >
         {checked && (
           <svg
-            className="h-3 w-3 text-white dark:text-gray-900"
+            className="h-3 w-3 text-white"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -105,32 +102,19 @@ export function KbPicker({
   live2dOn: boolean;
   onToggleLive2d: () => void;
 }) {
-  const [notes] = useState<KbNote[]>(() => {
-    // 优先用知识条目（含 Notion 层级/同步标记）；兼容旧 kimo_kb_notes
-    try {
-      const entries = JSON.parse(
-        localStorage.getItem("kimo_kb_entries") || "[]",
-      );
-      if (Array.isArray(entries)) {
-        return entries.map((e: Record<string, unknown>) => ({
-          id: String(e.id || ""),
-          title: String(e.name || ""),
-          content: String(e.content || ""),
-          createdAt: Number(e.createdAt || 0),
-          notionId: typeof e.notionId === "string" ? e.notionId : undefined,
-          notionParentId:
-            typeof e.notionParentId === "string" ? e.notionParentId : undefined,
-        }));
-      }
-    } catch {
-      /* 忽略，回退旧 notes */
-    }
-    try {
-      return JSON.parse(localStorage.getItem("kimo_kb_notes") || "[]");
-    } catch {
-      return [];
-    }
-  });
+  // 条目统一从 lib/kb 读取（与 Agent 面板同一数据源 + 一次性旧数据迁移）
+  const entries = useMemo(() => loadKbEntries(), []);
+  const notes = useMemo<KbNote[]>(
+    () =>
+      entries.map((e) => ({
+        id: e.id,
+        title: e.name,
+        content: e.content,
+        createdAt: e.createdAt,
+        notionId: e.notionId,
+      })),
+    [entries],
+  );
   const [listOpen, setListOpen] = useState(false);
   /** 展开列表内的条目搜索关键词（本地过滤 title/content） */
   const [query, setQuery] = useState("");
@@ -148,32 +132,14 @@ export function KbPicker({
         n.content.toLowerCase().includes(q),
     );
   }, [notes, query]);
-  /** 层级展示行：顶层条目 + 子页面缩进嵌套（父 = notionParentId 命中条目） */
+  /** 层级展示行：与 Agent 面板页面树共用 buildKbTreeRows（已同步/本地子页都能正确缩进） */
   const hierarchyRows = useMemo(() => {
-    const ids = new Set(notes.map((n) => n.id));
-    const byParent = new Map<string, KbNote[]>();
-    const top: KbNote[] = [];
-    for (const n of notes) {
-      const pid = n.notionParentId || "";
-      if (pid && ids.has(pid)) {
-        const arr = byParent.get(pid) || [];
-        arr.push(n);
-        byParent.set(pid, arr);
-      } else {
-        top.push(n);
-      }
-    }
-    const out: { note: KbNote; depth: number }[] = [];
-    const walk = (items: KbNote[], depth: number) => {
-      for (const n of items) {
-        out.push({ note: n, depth });
-        const kids = byParent.get(n.id);
-        if (kids && kids.length) walk(kids, depth + 1);
-      }
-    };
-    walk(top, 0);
-    return out;
-  }, [notes]);
+    const byId = new Map(notes.map((n) => [n.id, n]));
+    return buildKbTreeRows(entries).flatMap((r) => {
+      const note = byId.get(r.entry.id);
+      return note ? [{ note, depth: r.depth }] : [];
+    });
+  }, [entries, notes]);
   /** 展示行：有搜索词时平铺匹配结果，否则按层级 */
   const displayRows: { note: KbNote; depth: number }[] = query.trim()
     ? filteredNotes.map((n) => ({ note: n, depth: 0 }))
@@ -242,7 +208,7 @@ export function KbPicker({
   return createPortal(
     <div
       ref={popupRef}
-      className="fixed z-[100] animate-[kslideUp_0.25s_ease-out] overflow-hidden rounded-2xl border border-gray-200 bg-white/90 shadow-2xl backdrop-blur dark:border-gray-700 dark:bg-gray-900/90"
+      className="fixed z-[100] animate-[kslideUp_0.25s_ease-out] overflow-hidden rounded-card border border-line bg-surface shadow-[0_24px_64px_-24px_rgba(0,0,0,0.35)]"
       style={
         pos
           ? {
@@ -330,9 +296,7 @@ export function KbPicker({
             title={live2dOn ? "关闭" : "开启"}
             className={
               "relative h-5 w-9 shrink-0 rounded-full transition-colors duration-200 active:scale-90 " +
-              (live2dOn
-                ? "bg-gray-900 dark:bg-gray-200"
-                : "bg-gray-200 dark:bg-gray-700")
+              (live2dOn ? "bg-accent" : "bg-line-strong")
             }
           >
             <span

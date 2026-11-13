@@ -10,11 +10,21 @@ import {
 } from "../providerPresets";
 
 describe("providerPresets · 预设", () => {
-  it("包含 DeepSeek / Kimi / OpenAI 预设", () => {
+  it("包含常见直连服务商和模型聚合服务预设", () => {
     const ids = PROVIDER_PRESETS.map((p) => p.id);
     expect(ids).toContain("deepseek");
     expect(ids).toContain("kimi");
     expect(ids).toContain("openai");
+    expect(ids).toContain("mimo");
+    expect(ids).toContain("qwen");
+    expect(ids).toContain("glm");
+    expect(ids).toContain("siliconflow");
+    expect(ids).toContain("openrouter");
+  });
+  it("MiMo 预设使用官方兼容接口", () => {
+    const p = getPreset("mimo")!;
+    expect(p.endpoint).toBe("https://api.xiaomimimo.com/v1");
+    expect(p.model).toBe("mimo-v2-flash");
   });
   it("DeepSeek 预设：接口 + 最新 v4 + 历史别名", () => {
     const p = getPreset("deepseek")!;
@@ -63,6 +73,23 @@ describe("providerPresets · detectProvider", () => {
   it("OpenAI：openai 接口 / gpt 模型命中", () => {
     expect(detectProvider("https://api.openai.com/v1", "")).toBe("openai");
     expect(detectProvider("", "gpt-4o-mini")).toBe("openai");
+  });
+  it("识别 MiMo、Qwen、GLM 及模型聚合接口", () => {
+    expect(detectProvider("https://api.xiaomimimo.com/v1", "")).toBe("mimo");
+    expect(detectProvider("", "mimo-v2-flash")).toBe("mimo");
+    expect(
+      detectProvider("https://dashscope.aliyuncs.com/compatible-mode/v1", ""),
+    ).toBe("qwen");
+    expect(detectProvider("", "qwen-plus")).toBe("qwen");
+    expect(detectProvider("https://open.bigmodel.cn/api/paas/v4", "")).toBe(
+      "glm",
+    );
+    expect(detectProvider("https://api.siliconflow.cn/v1", "deepseek-ai/DeepSeek-V3")).toBe(
+      "siliconflow",
+    );
+    expect(detectProvider("https://openrouter.ai/api/v1", "openai/gpt-4o")).toBe(
+      "openrouter",
+    );
   });
   it("其他/空为 other", () => {
     expect(detectProvider("", "")).toBe("other");

@@ -13,6 +13,8 @@ import {
   isKbDescendant,
   reorderKbEntries,
   reparentKbEntry,
+  buildKbTreeRows,
+  formatKbEntriesForContext,
   type KbEntryRecord,
   type KbNote,
 } from "../kb";
@@ -111,13 +113,11 @@ describe("kb · detectKbSaveIntent（AI 漏发 [KB-SAVE:] 时前端兜底）", (
 });
 
 describe("kb · saveKbEntry（AI 保存知识库）", () => {
-  it("新建条目并同步到 kimo_kb_notes", () => {
+  it("新建条目（单一存储，不再镜像 kimo_kb_notes）", () => {
     const e = saveKbEntry("React 要点", "React 是 UI 库");
     expect(e.name).toBe("React 要点");
     expect(loadKbEntries()).toHaveLength(1);
-    const notes = JSON.parse(localStorage.getItem("kimo_kb_notes") || "[]");
-    expect(notes).toHaveLength(1);
-    expect(notes[0].title).toBe("React 要点");
+    expect(localStorage.getItem("kimo_kb_notes")).toBeNull();
   });
   it("按标题更新已有条目（忽略大小写/空格，不新增）", () => {
     saveKbEntry("React 要点", "v1");
@@ -297,5 +297,105 @@ describe("kb · 页面树：分组/排序/改父（order 与层级）", () => {
     expect(b.notionRootId).toBe("kroot");
     expect(b.order).toBe(1); // 顶层新兄弟 = [a] → 末尾追加
     expect(nx.find((e) => e.id === "c")?.order).toBe(0); // a 下只剩 c → 重排
+  });
+});
+
+describe("kb · buildKbTreeRows（页面树扁平行，Agent 面板与 / 弹窗共用）", () => {
+  const mk = (
+    id: string,
+    name: string,
+    extra: Partial<KbEntryRecord> = {},
+  ): KbEntryRecord => ({
+    id,
+    name,
+    content: `# ${name}`,
+    createdAt: 1,
+    ...extra,
+  });
+
+  it("已同步页面按 notionParentId 嵌套 + 同级按 order 排序", () => {
+    const entries = [
+      mk("b", "B", { notionId: "nb", notionParentId: "na", order: 1 }),
+      mk("a", "A", { notionId: "na", order: 0 }),
+      mk("c", "C", { notionId: "nc", notionParentId: "na", order: 0 }),
+    ];
+    const rows = buildKbTreeRows(entries);
+    expect(rows.map((r) => [r.entry.id, r.depth, r.hasChildren])).toEqual([
+      ["a", 0, true],
+      ["c", 1, false],
+      ["b", 1, false],
+    ]);
+  });
+
+  it("本地未同步子页用 parentId 嵌套（父不在条目集 → 顶层）", () => {
+    const entries = [
+      mk("p", "父"),
+      mk("c", "子", { parentId: "p" }),
+      mk("orphan", "孤儿", { parentId: "missing" }),
+    ];
+    const rows = buildKbTreeRows(entries);
+    expect(rows.find((r) => r.entry.id === "c")?.depth).toBe(1);
+    expect(rows.find((r) => r.entry.id === "orphan")?.depth).toBe(0);
+  });
+
+  it("折叠父页面时不输出子页", () => {
+    const entries = [mk("p", "父"), mk("c", "子", { parentId: "p" })];
+    const rows = buildKbTreeRows(entries, new Set(["p"]));
+    expect(rows.map((r) => r.entry.id)).toEqual(["p"]);
+    expect(rows[0].hasChildren).toBe(true);
+  });
+});
+
+describe("kb · formatKbEntriesForContext（AI 注入文本）", () => {
+  it("空条目返回空串", () => {
+    expect(formatKbEntriesForContext([])).toBe("");
+    expect(formatKbEntriesForContext([{ title: "x", content: "" }])).toBe("");
+  });
+
+  it("去重 + 每条截断 + 总量封顶", () => {
+    const long = "a".repeat(50);
+    const text = formatKbEntriesForContext(
+      [
+        { title: "一", content: long },
+        { title: "重复", content: long },
+        { title: "二", content: "短内容" },
+      ],
+      { perEntry: 10, maxChars: 80 },
+    );
+    expect(text.startsWith("【知识库条目】")).toBe(true);
+    expect(text).toContain("- 一：aaaaaaaaaa…");
+    expect(text).not.toContain("重复");
+    expect(text.length).toBeLessThanOrEqual(80);
+  });
+});
+
+describe("kb · loadKbEntries（单一数据源 + 一次性迁移）", () => {
+  it("条目键为空数组时不迁移旧笔记（避免删光后又复活）", () => {
+    localStorage.setItem(
+      "kimo_kb_notes",
+      JSON.stringify([
+        { id: "n1", title: "旧笔记", content: "x", createdAt: 1 },
+      ]),
+    );
+    localStorage.setItem("kimo_kb_entries", "[]");
+    expect(loadKbEntries()).toEqual([]);
+    expect(localStorage.getItem("kimo_kb_notes")).not.toBeNull();
+  });
+
+  it("条目键缺失时迁移旧笔记并清理旧 key", () => {
+    localStorage.setItem(
+      "kimo_kb_notes",
+      JSON.stringify([
+        { id: "n1", title: "旧笔记", content: "x", createdAt: 1 },
+      ]),
+    );
+    localStorage.removeItem("kimo_kb_entries");
+    const list = loadKbEntries();
+    expect(list).toHaveLength(1);
+    expect(list[0].name).toBe("旧笔记");
+    expect(localStorage.getItem("kimo_kb_notes")).toBeNull();
+    expect(
+      JSON.parse(localStorage.getItem("kimo_kb_entries") || "[]"),
+    ).toHaveLength(1);
   });
 });

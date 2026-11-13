@@ -18,6 +18,8 @@ import {
 } from "./searchSkill";
 import { kbSections } from "./kbSkill";
 import { live2dSections } from "./live2dSkill";
+import { agentToolsSection, artifactsSection } from "./agentSkill";
+import { pluginSystemSections } from "../agent/plugins";
 
 /**
  * 按需组装 system 提示词：每个功能是一个独立 skill 段（模块化，避免把不相关的
@@ -43,10 +45,13 @@ export function assembleSystem(ctx: SkillContext): string {
     viewIntroSection(ctx),
     viewSection(ctx),
     modeSection(ctx),
-    toolUsageSection(ctx),
+    ctx.agentNative ? agentToolsSection(ctx) : toolUsageSection(ctx),
     answerQualitySection(ctx),
     knowledgeFusionSection(ctx),
-    ...kbSections(),
+    artifactsSection(ctx),
+    ...kbSections(ctx),
+    // 插件自带的 system 段（新增功能不需要再改本文件）
+    ...pluginSystemSections(ctx),
   ];
   if (ctx.l2dEnabled) sections.push(...live2dSections());
   // 音频 TTS 模式：AI 回复像真人说话一样自然口语化（便于语音朗读），禁止动作描写/旁白；仍可附 Live2D 指令

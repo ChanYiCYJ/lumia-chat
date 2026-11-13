@@ -128,10 +128,25 @@ export async function notionRequest<T>(
       await new Promise((r) => setTimeout(r, 400 * Math.pow(2, attempt)));
       continue;
     }
-    const j = (await res.json().catch(() => ({}))) as {
+    // 代理失配自检：线上若 /api/notion/* 被 SPA 回退接管，会返回 index.html（状态码 200），
+    // res.json() 解析失败。此时必须抛错，否则会被当成「连接成功但工作区为空」（Token 看起来不生效）。
+    const contentType = res.headers?.get?.("content-type") || "";
+    let parsed: unknown = {};
+    let parseFailed = false;
+    try {
+      parsed = await res.json();
+    } catch {
+      parseFailed = true;
+    }
+    const j = (parsed || {}) as {
       message?: unknown;
       error?: unknown;
     };
+    if (res.ok && (parseFailed || contentType.includes("text/html"))) {
+      throw new Error(
+        "Notion 代理未生效：/api/notion 返回的是网页而非接口数据，请检查 Worker 的 /api 路由配置",
+      );
+    }
     if (!res.ok) {
       const msg = j?.message || j?.error || `Notion 请求失败 (${res.status})`;
       throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
@@ -525,11 +540,19 @@ export async function fetchNotionSelectedContent(
   ).slice(0, maxChars);
 }
 
-/** 测试 Notion 连接（空查询搜 1 条验证 Token/权限） */
+/** 测试 Notion 连接（空查询搜 1 条验证 Token/权限）
+ * - ok:false → Token 无效/无权限
+ * - ok:true + empty:true → Token 有效但工作区未共享任何页面（同步会空跑，需用户授权）
+ */
 export async function testNotionConnection(
   token: string,
   fetchImpl?: typeof fetch,
-): Promise<{ ok: boolean; message: string; latencyMs?: number }> {
+): Promise<{
+  ok: boolean;
+  message: string;
+  latencyMs?: number;
+  empty?: boolean;
+}> {
   if (!token.trim())
     return { ok: false, message: "请先填写 Notion Integration Token" };
   const t0 = performance.now();
@@ -544,6 +567,7 @@ export async function testNotionConnection(
     const n = parseSearchResponse(data).length;
     return {
       ok: true,
+      empty: n === 0,
       message: n
         ? "连接成功"
         : "连接成功（工作区暂无可访问内容，请确认 Integration 已共享到页面/数据库）",
@@ -556,6 +580,26 @@ export async function testNotionConnection(
       ? "Token 无效或无权限（请确认 Token 正确且 Integration 已共享到目标页面）"
       : msg;
     return { ok: false, message: friendly, latencyMs: ms };
+  }
+}
+
+/** 读取 Integration 自身信息（users/me）：用于把「去共享页面」的指引写清楚（显示 Integration 名称/工作区） */
+export async function fetchNotionBotUser(
+  token: string,
+  fetchImpl?: typeof fetch,
+): Promise<{ name: string; workspace: string }> {
+  if (!token.trim()) return { name: "", workspace: "" };
+  try {
+    const u = await notionRequest<{
+      name?: string;
+      bot?: { workspace_name?: string };
+    }>("users/me", { token: token.trim(), fetchImpl });
+    return {
+      name: (u?.name || "").trim(),
+      workspace: (u?.bot?.workspace_name || "").trim(),
+    };
+  } catch {
+    return { name: "", workspace: "" };
   }
 }
 

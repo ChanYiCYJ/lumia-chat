@@ -69,6 +69,7 @@ export const BACKUP_CATEGORIES: BackupCategoryDef[] = [
       "kimo_ai_websearch",
       "kimo_ai_browse_agent",
       "kimo_ai_autoknow",
+      "kimo_ai_avatar_",
       "kimo_theme_mode",
       "kimo_kb_store_mode",
       "kimo_live2d_",

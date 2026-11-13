@@ -59,4 +59,8 @@ export interface SkillContext {
   l2dEnabled?: boolean;
   /** 音频 TTS 模式：注入「回复简短口语化」提示（更适合语音朗读） */
   ttsMode?: boolean;
+  /** 原生工具调用（pi-agent-core）：开启后用工具说明替代 [TAG:] 指令 */
+  agentNative?: boolean;
+  /** 本会话产物清单（id/类型/标题），原生模式下注入 */
+  artifactsBrief?: string;
 }

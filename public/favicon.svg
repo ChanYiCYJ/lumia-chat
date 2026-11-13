@@ -1,10 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Lumia Chat">
   <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#1f2937"/>
-      <stop offset="1" stop-color="#4b5563"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#243244"/>
+      <stop offset="1" stop-color="#0b1220"/>
     </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.42" cy="0.38" r="0.62">
+      <stop offset="0" stop-color="#fff7d6"/>
+      <stop offset="1" stop-color="#f5a524"/>
+    </radialGradient>
   </defs>
-  <rect width="64" height="64" rx="14" fill="url(#g)"/>
-  <path d="M25 18 V46 M28 32 L44 18 M28 32 L44 46" fill="none" stroke="#ffffff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect width="64" height="64" rx="15" fill="url(#bg)"/>
+  <rect width="64" height="64" rx="15" fill="url(#sheen)"/>
+  <path
+    d="M24 15.5v26a6.5 6.5 0 0 0 6.5 6.5H45"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <circle cx="46.5" cy="17.5" r="7" fill="#f5a524" opacity="0.16" />
+  <circle cx="46.5" cy="17.5" r="4.5" fill="url(#glow)" />
 </svg>

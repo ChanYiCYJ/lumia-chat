@@ -36,7 +36,7 @@ export const SITE_DOC_TEXT = `一、对话基础
 
 七、Agent 工具箱（右侧面板）
 - tab：知识库 / View（浏览文章）/ Live2D / 设置。
-- 设置 tab：对话字号、搜索模式、搜索 API、模型 API 配置、Notion 同步（AI 记忆/人格/设置/会话自动同步到 Notion，密钥不上传，可选择同步位置，多端数据自动合并）。
+- 设置 tab：对话字号、搜索模式、搜索 API、模型 API 配置、Notion（填一个 Integration Token 即可；AI 记忆/人格/设置/会话与知识库自动双向同步，密钥不上传，多端数据自动合并）。
 
 八、合规与后台
 - 管理员可在后台为每个 AI 助手开启「仅管理员可使用」；站点设置可关闭 AI 菜单入口（show_ai）。

@@ -159,7 +159,7 @@ export function deepseekErrorText(status?: number, message?: string): string {
       return `搜索请求参数不合法${detail ? `（${detail}）` : ""}`;
     case 401:
     case 403:
-      return "DeepSeek API Key 无效或已失效，请在设置 → 模型API配置中检查";
+      return "DeepSeek API Key 无效或已失效，请在设置 → 模型 API 中检查";
     case 402:
       return "DeepSeek 账号余额不足，搜索服务暂不可用";
     case 408:

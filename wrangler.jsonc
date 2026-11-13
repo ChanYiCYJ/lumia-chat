@@ -16,7 +16,12 @@
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
+    // SPA 回退：非静态资源路径回退到 index.html（前端路由刷新不 404）
     "not_found_handling": "single-page-application",
+    // 关键：run_worker_first 让 Worker 先接管 /api、/static，再做静态资源/SPA 回退。
+    // 若不配置，Cloudflare 会直接返回 index.html，worker.js 的 /api/notion 等代理分支永远不会执行
+    // （表现为「Notion Token 保存了但不生效 / 联网搜索无结果」）。
+    "run_worker_first": ["/api/*", "/static/*"],
   },
   "vars": {
     // API_BACKEND 用 Secret 配置，避免把后端地址写入仓库。

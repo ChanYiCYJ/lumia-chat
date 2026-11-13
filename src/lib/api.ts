@@ -147,8 +147,42 @@ export function resolveAsset(url: string | null | undefined): string {
   )
     return url;
   const origin = apiOrigin();
-  if (origin && url.startsWith("/")) return `${origin}${url}`;
+  // 只给后端静态资源（/static/...）拼后端源；
+  // 站点自有资源（如 /favicon.svg）必须保持同源，否则会被 VITE_MEDIA_BASE 指向主站图标。
+  if (origin && url.startsWith("/static/")) return `${origin}${url}`;
   return url;
+}
+
+/** Update the browser-tab icon and keep its MIME type in sync with the image. */
+export function setPageFavicon(url: string | null | undefined): void {
+  const href = resolveAsset(url) || "/favicon.svg";
+  let link = document.querySelector<HTMLLinkElement>('link[rel~="icon"]');
+  if (!link) {
+    link = document.createElement("link");
+    link.rel = "icon";
+    document.head.appendChild(link);
+  }
+
+  const dataMime = href.match(/^data:(image\/[a-z0-9.+-]+)/i)?.[1];
+  const pathname = href.split(/[?#]/, 1)[0].toLowerCase();
+  const extensionMime: Record<string, string> = {
+    ".avif": "image/avif",
+    ".gif": "image/gif",
+    ".ico": "image/x-icon",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".webp": "image/webp",
+  };
+  const mime =
+    dataMime ||
+    Object.entries(extensionMime).find(([extension]) =>
+      pathname.endsWith(extension),
+    )?.[1];
+  if (mime) link.type = mime;
+  else link.removeAttribute("type");
+  link.href = href;
 }
 
 /** 把 File 读成 data URL（演示模式上传用） */

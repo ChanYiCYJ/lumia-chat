@@ -9,7 +9,16 @@
  *    必须给足否则 content 为空；Kimi moonshot-v1 默认 max_tokens=1024，长文易被截断）
  */
 
-export type AiProvider = "deepseek" | "kimi" | "openai" | "other";
+export type AiProvider =
+  | "deepseek"
+  | "kimi"
+  | "openai"
+  | "mimo"
+  | "qwen"
+  | "glm"
+  | "siliconflow"
+  | "openrouter"
+  | "other";
 
 export interface ProviderPreset {
   id: AiProvider;
@@ -77,6 +86,51 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     latest: ["gpt-4o-mini"],
     desc: "OpenAI 官方兼容接口",
   },
+  {
+    id: "mimo",
+    name: "小米 MiMo",
+    endpoint: "https://api.xiaomimimo.com/v1",
+    model: "mimo-v2-flash",
+    models: ["mimo-v2-flash"],
+    latest: ["mimo-v2-flash"],
+    desc: "小米 MiMo 官方接口，支持 OpenAI 兼容调用",
+  },
+  {
+    id: "qwen",
+    name: "阿里云 Qwen",
+    endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    model: "qwen-plus",
+    models: ["qwen-plus", "qwen-max", "qwen-turbo", "qwen-long"],
+    latest: ["qwen-plus"],
+    desc: "阿里云百炼兼容接口，可使用 Qwen 系列模型",
+  },
+  {
+    id: "glm",
+    name: "智谱 GLM",
+    endpoint: "https://open.bigmodel.cn/api/paas/v4",
+    model: "glm-4.5-flash",
+    models: ["glm-4.5-flash", "glm-4.5-air", "glm-4.5"],
+    latest: ["glm-4.5-flash"],
+    desc: "智谱 BigModel OpenAI 兼容接口",
+  },
+  {
+    id: "siliconflow",
+    name: "硅基流动",
+    endpoint: "https://api.siliconflow.cn/v1",
+    model: "Qwen/Qwen3-8B",
+    models: ["Qwen/Qwen3-8B"],
+    latest: ["Qwen/Qwen3-8B"],
+    desc: "聚合多种开源模型，模型可通过搜索接口获取",
+  },
+  {
+    id: "openrouter",
+    name: "OpenRouter",
+    endpoint: "https://openrouter.ai/api/v1",
+    model: "openai/gpt-4o-mini",
+    models: ["openai/gpt-4o-mini"],
+    latest: ["openai/gpt-4o-mini"],
+    desc: "聚合多家模型服务，模型 ID 通常为提供商/模型名",
+  },
 ];
 
 export function getPreset(id: AiProvider): ProviderPreset | undefined {
@@ -87,16 +141,24 @@ export function getPreset(id: AiProvider): ProviderPreset | undefined {
 export function detectProvider(endpoint: string, model: string): AiProvider {
   const e = endpoint.toLowerCase();
   const m = model.toLowerCase();
-  if (e.includes("deepseek") || m.includes("deepseek")) return "deepseek";
+  if (e.includes("xiaomimimo") || e.includes("mimo")) return "mimo";
+  if (e.includes("siliconflow")) return "siliconflow";
+  if (e.includes("dashscope") || e.includes("aliyun")) return "qwen";
+  if (e.includes("bigmodel") || e.includes("zhipu")) return "glm";
+  if (e.includes("openrouter")) return "openrouter";
+  if (e.includes("deepseek")) return "deepseek";
   if (
     e.includes("moonshot") ||
-    m.includes("moonshot") ||
-    e.includes("kimi") ||
-    m.includes("kimi")
+    e.includes("kimi")
   )
     return "kimi";
-  if (e.includes("openai") || e.includes("openrouter") || m.includes("gpt"))
-    return "openai";
+  if (e.includes("openai")) return "openai";
+  if (m.includes("mimo")) return "mimo";
+  if (m.includes("qwen")) return "qwen";
+  if (m.includes("glm")) return "glm";
+  if (m.includes("kimi") || m.includes("moonshot")) return "kimi";
+  if (m.includes("deepseek")) return "deepseek";
+  if (m.includes("gpt")) return "openai";
   return "other";
 }
 

@@ -1,7 +1,19 @@
-import type { SkillSection } from "./util";
+import type { SkillContext, SkillSection } from "./util";
 
 /** 知识库操作指令（KB-SAVE/KB-EDIT/KB-DELETE/KB）+ 工具指令通用前置说明（核心指令段，始终保留） */
-export function kbSections(): SkillSection[] {
+export function kbSections(ctx?: SkillContext): SkillSection[] {
+  if (ctx?.agentNative) {
+    return [
+      {
+        id: "kb",
+        text: "\n\n【知识库操作（重要，务必遵循）】你的知识库已与你的 Notion 工作区**全自动双向同步**：保存/编辑/删除知识库条目都会自动同步到你的 Notion，知识库就是 Notion 的编辑入口，不需要任何手动同步。当用户说「帮我记/记一下/保存到知识库/存入知识库/整理要点/记笔记/沉淀知识/收藏这段/记到 Notion/在 Notion 里创建页面/保存任务/写文档到 Notion」时，你**必须**调用 kb_save 工具（title 简短概括主题、content 完整要点；同名标题会更新，不要新建重复条目）。用户要求「修改/更新知识库里的 xxx」时，也用 kb_save 传入相同 title 覆盖；要求「删除/移除/清掉知识库里的 xxx」时调用 kb_delete（按标题精确匹配，Notion 侧不可恢复，删除前可先确认）；用户需要「查看/整理/用到知识库」时调用 kb_search。**绝不要说「我没有创建 Notion 页面的能力」**——调用 kb_save 即可创建。",
+      },
+      {
+        id: "toolPreface",
+        text: '\n\n重要：调用任何工具前必须先输出一两句面向用户的中文说明文字（如"好的，我帮你记一下"），再发起工具调用；一次只调用一个工具。',
+      },
+    ];
+  }
   return [
     {
       id: "kb",

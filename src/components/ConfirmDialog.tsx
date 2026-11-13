@@ -29,35 +29,30 @@ export function ConfirmDialog({
   if (!open) return null;
   return createPortal(
     <div className="fixed inset-0 z-[97] flex items-center justify-center p-4">
-      <div
-        className="absolute inset-0 bg-black/40 backdrop-blur-sm"
-        onClick={onCancel}
-      />
-      <div className="relative w-full max-w-sm rounded-3xl border border-gray-200 bg-white shadow-2xl dark:border-gray-700 dark:bg-gray-900">
+      <div className="absolute inset-0 bg-black/30" onClick={onCancel} />
+      <div className="relative w-full max-w-sm rounded-sheet border border-line bg-surface shadow-[0_24px_64px_-24px_rgba(0,0,0,0.35)]">
         <div className="p-5">
-          <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-            {title}
-          </h3>
+          <h3 className="text-base font-semibold text-fg">{title}</h3>
           {message && (
-            <p className="mt-1.5 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+            <p className="mt-1.5 text-xs leading-relaxed text-fg-muted">
               {message}
             </p>
           )}
           {children}
         </div>
-        <div className="flex items-center gap-2 border-t border-gray-100 px-4 py-3 dark:border-gray-700">
+        <div className="flex items-center gap-2 border-t border-line px-4 py-3">
           <button
             onClick={onCancel}
-            className="flex-1 rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-600 transition hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
+            className="flex-1 cursor-pointer rounded-control border border-line px-3 py-2 text-sm text-fg-muted transition hover:bg-sunken hover:text-fg"
           >
             {cancelText}
           </button>
           <button
             onClick={onConfirm}
-            className={`flex-1 rounded-xl px-3 py-2 text-sm font-medium text-white transition ${
+            className={`flex-1 cursor-pointer rounded-control px-3 py-2 text-sm font-medium transition ${
               danger
-                ? "bg-red-500 hover:bg-red-600"
-                : "bg-gray-900 hover:bg-gray-800 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
+                ? "bg-danger text-white hover:opacity-90"
+                : "border border-line-strong bg-surface text-fg hover:bg-sunken"
             }`}
           >
             {confirmText}

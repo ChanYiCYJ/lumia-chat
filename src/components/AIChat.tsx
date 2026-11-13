@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import type { AIChatConfig, Page } from "../lib/types";
 import { useSite } from "../lib/site";
-import { resolveAsset } from "../lib/api";
+import { setPageFavicon } from "../lib/api";
 import { useTheme } from "../lib/theme";
 import {
   searchAI,
@@ -52,13 +52,11 @@ import {
   buildNotionDbContext,
 } from "../lib/notion";
 import {
-  getKbSelections,
-  getKbNotes,
-  assembleKnowledge,
   parseKbTool,
   saveKbEntry,
   detectKbSaveIntent,
   loadKbEntries,
+  formatKbEntriesForContext,
 } from "../lib/kb";
 import { getLocalCfg, type LocalAIConfig } from "../lib/localCfg";
 import {
@@ -78,8 +76,8 @@ import {
 import {
   mergeEffCfg,
   hasLocalApi,
-  lsGet,
-  saveCustomModelOn,
+  loadAgentNativeTools,
+  loadSearchApiKey,
   loadChatFontSize,
   loadNetMode,
   saveNetMode,
@@ -111,12 +109,34 @@ import {
   type ChatSearchSpeed,
   type ChatSearchDepth,
 } from "../lib/chatSettings";
+import { clearAvatar, loadAvatar, saveAvatar } from "../lib/avatar";
 import { LocalApiModal } from "./LocalApiModal";
+import { btnPrimary } from "./ui";
 import { ArticleComposerModal } from "./ArticleComposerModal";
 import { AgentPanel } from "./AgentPanel";
+import { PluginsPage } from "./PluginsPage";
+import { PowerlineFooter } from "./PowerlineFooter";
+import { StudyPage } from "./StudyPage";
+import type { ActivityItem } from "./AgentActivityCard";
+import { extractSourceLinks } from "../lib/messageCards";
 // 性能优化：AgentPanel 是重型组件（含编辑器/知识库/Live2D 等）且桌面+移动双实例渲染；
 // memo 后配合稳定 props，在输入/冷却/流式等父组件重渲染时跳过不必要的重复渲染
 const MemoAgentPanel = memo(AgentPanel);
+import {
+  clearSessionArtifacts,
+  formatArtifactsBrief,
+  listArtifacts,
+  migrateArtifactsFromSearchCache,
+  removeArtifact,
+  upsertArtifact,
+  type Artifact,
+  type ArtifactKind,
+  type BrowseArtifactInput,
+} from "../lib/artifacts";
+import { runAgentTurn } from "../lib/agent/piRunner";
+import { toolUi } from "../lib/agent/piTools";
+import { getToolSupport, markToolSupport } from "../lib/agent/capability";
+import { createTagGate } from "../lib/agent/tagBridge";
 import { KbPicker } from "./KbPicker";
 import {
   detectEmotion,
@@ -145,6 +165,42 @@ import {
   stopSpeaking,
   subscribe,
 } from "../lib/live2dCore";
+/** 浏览器内置语音兼底：后端 TTS 不可用（如 502 / 网络被拦）时仍能出声。 */
+function stopBrowserSpeak() {
+  try {
+    window.speechSynthesis?.cancel();
+  } catch {
+    /* 环境不支持时忽略 */
+  }
+}
+function speakWithBrowser(
+  text: string,
+  opts: { volume?: number; onEnd?: () => void },
+): boolean {
+  try {
+    const synth = window.speechSynthesis;
+    if (!synth || typeof SpeechSynthesisUtterance === "undefined") {
+      opts.onEnd?.();
+      return false;
+    }
+    stopBrowserSpeak();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "zh-CN";
+    u.volume = Math.max(0, Math.min(1, opts.volume ?? 0.8));
+    const zh = synth
+      .getVoices()
+      .find((v) => (v.lang || "").toLowerCase().startsWith("zh"));
+    if (zh) u.voice = zh;
+    const done = () => opts.onEnd?.();
+    u.onend = done;
+    u.onerror = done;
+    synth.speak(u);
+    return true;
+  } catch {
+    opts.onEnd?.();
+    return false;
+  }
+}
 import { cleanTtsText, getTtsAudio } from "../lib/ttsCache";
 import {
   buildLorePrompt,
@@ -231,12 +287,15 @@ const PhaseTypeWriter = memo(function PhaseTypeWriter({
   phase: "search" | "generate";
 }) {
   return (
-    <TypeWriter
-      key={phase}
-      text={phase === "search" ? "正在搜索…" : "正在生成…"}
-      loop
-      className="text-xs text-gray-400 dark:text-gray-500"
-    />
+    <span className="inline-flex items-center gap-1.5 text-[11px] leading-4 text-fg-muted">
+      <span className="h-1 w-1 animate-pulse rounded-full bg-accent" />
+      <TypeWriter
+        key={phase}
+        text={phase === "search" ? "正在搜索…" : "正在生成…"}
+        loop
+        className="text-[11px] text-fg-muted"
+      />
+    </span>
   );
 });
 
@@ -247,7 +306,7 @@ const LoreLoadingCard = memo(function LoreLoadingCard({
   modelName: string;
 }) {
   return (
-    <div className="mb-3 flex items-center gap-3 rounded-2xl border border-gray-200 bg-white/90 p-3.5 dark:border-gray-700 dark:bg-gray-800/90">
+    <div className="mb-3 flex items-center gap-3 rounded-card border border-line bg-surface p-3.5">
       <span className="grid h-9 w-9 shrink-0 place-content-center rounded-full bg-gray-100 dark:bg-gray-700">
         <svg
           className="h-4 w-4 animate-spin text-gray-500 dark:text-gray-400"
@@ -287,29 +346,31 @@ interface ChatToolCall {
   msgIdx: number;
   type: string;
   detail: string;
-  tab?: "web" | "kb" | "edit" | "settings";
+  tab?: "kb" | "edit" | "settings" | "artifacts" | "live2d";
+  /** 原生工具调用的 id（tool_execution_start/end 配对，用于把卡片从生成中改为完成） */
+  toolCallId?: string;
   /** 浏览/搜索关键词（点击卡片时传给 Agent 面板触发 AI 搜索） */
   query?: string;
   /** 文章后台生成中（卡片显示「生成中…」） */
   pending?: boolean;
   /** 所属会话 id（刷新后按会话恢复工具卡历史） */
   sessionId?: string;
+  /** 关联产物（工具执行完成后回填，卡片直接展示标题/字数/来源并可一键打开） */
+  artifactId?: string;
+  artifactKind?: ArtifactKind;
+  artifactTitle?: string;
+  chars?: number;
+  sourceCount?: number;
 }
 
 /** 稳定空数组：工具卡为空的消息传同一引用（避免每次渲染新建 [] 击穿 MessageItem memo） */
-const EMPTY_TOOLCALLS: ChatToolCall[] = [];
 
-/** 工具卡片类型颜色（模块级常量，避免每次渲染重建） */
-const TOOL_DOT: Record<string, string> = {
-  保存知识库: "bg-emerald-500",
-  编辑知识库: "bg-emerald-500",
-  View: "bg-sky-500",
-  Search: "bg-blue-500",
-  优化文章: "bg-indigo-500",
-  网络资料: "bg-amber-500",
-  编辑文档: "bg-orange-500",
-  打开知识库: "bg-teal-500",
-};
+/** 工具调用不再在消息内渲染卡片（减少刷屏）：保留类型供双通道去重/日志使用 */
+
+/** 消息列表内不再展示工具调用卡片 */
+
+/** 原生工具 → 工具卡展示（type 用于文案/配色，tab 决定点击打开哪个面板）
+ *  映射由各插件自己声明（agent/plugins/*Plugin.ts 的 ui 字段），这里不再硬编码。 */
 
 /**
  * 单条消息（memo 化）：性能优化——
@@ -325,12 +386,10 @@ const MessageItem = memo(function MessageItem({
   avatar,
   botName,
   fontSizeCls,
-  toolCalls,
   speakingIdx,
   ttsOn,
   onSpeak,
   onOpenAgent,
-  onToolClick,
   feedbackRating,
   onFeedback,
 }: {
@@ -340,36 +399,37 @@ const MessageItem = memo(function MessageItem({
   avatar?: string;
   botName: string;
   fontSizeCls: string;
-  toolCalls: ChatToolCall[];
   speakingIdx: number;
   /** TTS 总开关：关闭时隐藏「朗读」按钮 */
   ttsOn: boolean;
   onSpeak: (text: string, idx: number) => void;
   onOpenAgent: (url: string | undefined) => void;
-  onToolClick: (tc: ChatToolCall) => void;
   feedbackRating: 0 | 1 | -1;
   onFeedback: (index: number, rating: 1 | -1) => void;
 }) {
+  /** 回复中的链接（≥2 时渲染「参考来源」卡；流式中不解析，避免每帧扫描） */
+  const sourceLinks = useMemo(
+    () =>
+      m.role === "assistant" && !isStreamingMsg
+        ? extractSourceLinks(stripToolCmds(stripEmotionTag(m.content)), 4)
+        : [],
+    [m.role, isStreamingMsg, m.content],
+  );
   return (
     <div
       className={`group flex chat-message-enter gap-3 py-4 ${
         m.role === "user" ? "justify-end" : ""
       } sm:py-5`}
     >
-      {m.role === "assistant" &&
-        (avatar ? (
-          <img
-            src={avatar}
-            alt=""
-            className="mt-0.5 h-8 w-8 shrink-0 rounded-full object-cover"
-          />
-        ) : (
-          <span className="mt-0.5 grid h-8 w-8 shrink-0 place-content-center rounded-full bg-gray-200 text-xs font-bold text-gray-500 dark:bg-gray-800">
-            {botName.slice(0, 2) || "AI"}
-          </span>
-        ))}
+      {m.role === "assistant" && avatar && (
+        <img
+          src={avatar}
+          alt={botName}
+          className="mt-0.5 h-8 w-8 shrink-0 rounded-full object-cover"
+        />
+      )}
       <div
-        className={`min-w-0 ${m.role === "user" ? `max-w-[85%] rounded-2xl border border-gray-200 bg-gray-100 px-4 py-2.5 leading-relaxed text-gray-800 sm:max-w-[70%] dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 ${fontSizeCls}` : `flex-1 leading-relaxed text-gray-800 dark:text-gray-100 ${fontSizeCls}`}`}
+        className={`min-w-0 ${m.role === "user" ? `max-w-[85%] rounded-[18px] bg-sunken px-4 py-2.5 leading-relaxed text-fg sm:max-w-[70%] ${fontSizeCls}` : `max-w-[72ch] flex-1 leading-relaxed text-fg ${fontSizeCls}`}`}
       >
         {m.role === "assistant" ? (
           <div className="chat-md">
@@ -379,14 +439,7 @@ const MessageItem = memo(function MessageItem({
                 {stripToolCmds(stripEmotionTag(m.content))}
               </span>
             ) : (
-              <MarkdownContent
-                content={m.content}
-                fallback={
-                  toolCalls.length
-                    ? `（${toolCalls[0].type}：${toolCalls[0].detail}）`
-                    : ""
-                }
-              />
+              <MarkdownContent content={m.content} fallback="" />
             )}
           </div>
         ) : (
@@ -420,72 +473,26 @@ const MessageItem = memo(function MessageItem({
             <span className="whitespace-pre-wrap">{m.content}</span>
           </>
         )}
-        {/* 工具调用小卡片：可点击（带箭头 + 按压反馈），不可点击则平淡 */}
-        {/* 手机适配：flex-nowrap + 横向滚动，多张卡片不换行挤占空间（缩成一行滚动查看） */}
-        {toolCalls.length > 0 && (
-          <div className="mt-1.5 flex flex-wrap gap-1.5 max-sm:flex-nowrap max-sm:overflow-x-auto no-scrollbar">
-            {toolCalls.map((tc, j) => (
-              <button
-                key={j}
-                onClick={() => onToolClick(tc)}
-                title={tc.tab ? "点击打开 Agent 面板" : undefined}
-                className={`group inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-xs transition max-sm:shrink-0 max-sm:max-w-[70%] max-sm:px-2 max-sm:py-1 ${
-                  tc.tab
-                    ? "cursor-pointer border-gray-200 bg-white text-gray-700 hover:border-blue-300 hover:bg-blue-50/50 hover:text-blue-600 active:scale-95 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 dark:hover:border-blue-700 dark:hover:bg-blue-900/20 dark:hover:text-blue-400"
-                    : "cursor-default border-gray-100 bg-gray-50 text-gray-400 dark:border-gray-800 dark:bg-gray-800/40 dark:text-gray-500"
-                }`}
-              >
-                <span
-                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${TOOL_DOT[tc.type] || "bg-gray-400"}`}
-                />
-                <span className="shrink-0 font-medium">{tc.type}</span>
-                {tc.pending ? (
-                  <span className="flex shrink-0 items-center gap-1 text-gray-400 dark:text-gray-500">
-                    <svg
-                      className="h-3 w-3 animate-spin"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                    >
-                      <circle
-                        className="opacity-25"
-                        cx="12"
-                        cy="12"
-                        r="10"
-                        stroke="currentColor"
-                        strokeWidth="4"
-                      />
-                      <path
-                        className="opacity-75"
-                        fill="currentColor"
-                        d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
-                      />
-                    </svg>
-                    生成中…
-                  </span>
-                ) : (
-                  <span className="min-w-0 truncate text-gray-400 dark:text-gray-500">
-                    {tc.detail}
-                  </span>
-                )}
-                {tc.tab && (
-                  <svg
-                    className="h-3.5 w-3.5 shrink-0 text-gray-300 transition group-hover:text-blue-500 dark:text-gray-600"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M9 5l7 7-7 7"
-                    />
-                  </svg>
-                )}
-              </button>
-            ))}
-          </div>
-        )}
+        {/* 最简来源行：只留域名链接，不加卡片边框/网格 */}
+        {m.role === "assistant" &&
+          !isStreamingMsg &&
+          sourceLinks.length >= 2 && (
+            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] leading-4 text-fg-muted">
+              <span>来源</span>
+              {sourceLinks.map((l) => (
+                <a
+                  key={l.url}
+                  href={l.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={l.title}
+                  className="max-w-[42%] truncate underline-offset-2 transition hover:text-accent hover:underline"
+                >
+                  {l.host || l.title}
+                </a>
+              ))}
+            </div>
+          )}
 
         {m.role === "assistant" && (
           <div
@@ -608,40 +615,10 @@ const MessageItem = memo(function MessageItem({
   );
 });
 
-/** auto 模式搜索计数卡：只显示获取到的词条数（不展示来源/链接——避免搜索资料窗口露出违规内容） */
-const SearchResultsCard = memo(function SearchResultsCard({
-  results,
-}: {
-  results: { title: string; url: string; source: string }[];
-}) {
-  const count = results.length;
-  if (count === 0) return null;
-  return (
-    <div className="mt-2 flex gap-3">
-      <span className="mt-0.5 h-8 w-8 shrink-0" />
-      <div className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white/80 px-3 py-1.5 text-[11px] font-medium text-gray-400 dark:border-gray-700 dark:bg-gray-800/80 dark:text-gray-500">
-        <svg
-          className="h-3.5 w-3.5 shrink-0"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <circle cx="11" cy="11" r="7" />
-          <path d="M21 21l-4.35-4.35" strokeLinecap="round" />
-        </svg>
-        已获取 {count} 个词条
-      </div>
-    </div>
-  );
-});
-
-/** 导航栏角色头像：懒加载 + 加载完成淡入（优化模型图片加载），无图时显示首字占位 */
+/** 导航栏角色头像：懒加载 + 加载完成淡入（优化模型图片加载）；未设置头像时不渲染任何占位 */
 function BotAvatar({
   src,
-  name,
   className = "h-5 w-5",
-  textCls = "",
 }: {
   src?: string;
   name?: string;
@@ -649,15 +626,8 @@ function BotAvatar({
   textCls?: string;
 }) {
   const [loaded, setLoaded] = useState(false);
-  if (!src) {
-    return (
-      <span
-        className={`grid shrink-0 place-content-center rounded-full bg-gray-100 text-[9px] font-bold text-gray-500 dark:bg-gray-800 dark:text-gray-300 ${textCls} ${className}`}
-      >
-        {(name || "AI").slice(0, 2)}
-      </span>
-    );
-  }
+  // 默认不展示头像（用户要求）：没有图片时不渲染任何占位
+  if (!src) return null;
   return (
     <img
       src={src}
@@ -691,7 +661,7 @@ function EmptyStateFeatures({
         <button
           key={s}
           onClick={() => onPick(s)}
-          className="rounded-full border border-gray-300 bg-white px-4 py-2 text-sm text-gray-600 transition hover:border-gray-500 hover:text-gray-900 active:scale-95 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300 dark:hover:text-white"
+          className="cursor-pointer rounded-control border border-line bg-surface px-3.5 py-2 text-sm text-fg-muted transition hover:border-accent/50 hover:text-fg active:scale-[0.99]"
         >
           {s}
         </button>
@@ -699,6 +669,60 @@ function EmptyStateFeatures({
     </div>
   );
 }
+
+/**
+ * 极简搜索/生成状态行：不加卡片、不加阶段条、不加骸架屏，只留一行。
+ * 执行中显示当前动作；完成后由结果入口/来源行接管。
+ */
+const SearchStatusLine = memo(function SearchStatusLine({
+  isSearch,
+  activity,
+  count,
+}: {
+  isSearch: boolean;
+  activity?: ActivityItem;
+  count?: number;
+}) {
+  return (
+    <div className="flex items-center gap-1.5 py-1.5 text-[11px] leading-4 text-fg-muted sm:pl-11">
+      <svg
+        className="h-3 w-3 shrink-0 animate-spin"
+        viewBox="0 0 24 24"
+        fill="none"
+      >
+        <circle
+          className="opacity-25"
+          cx="12"
+          cy="12"
+          r="10"
+          stroke="currentColor"
+          strokeWidth="4"
+        />
+        <path
+          className="opacity-75"
+          fill="currentColor"
+          d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
+        />
+      </svg>
+      <span className="shrink-0">{isSearch ? "搜索中…" : "生成中…"}</span>
+      {activity?.label && (
+        <>
+          <span className="text-gray-300 dark:text-gray-600">·</span>
+          <span className="min-w-0 truncate">
+            {activity.label}
+            {activity.detail ? ` ${activity.detail}` : ""}
+          </span>
+        </>
+      )}
+      {!!count && count > 0 && (
+        <>
+          <span className="text-gray-300 dark:text-gray-600">·</span>
+          <span className="shrink-0">{count} 条</span>
+        </>
+      )}
+    </div>
+  );
+});
 
 export interface BotItem {
   id: number;
@@ -733,6 +757,39 @@ const AGENT_STATE_KEY = (pageId: number) => `kimo_ai_agent_state_${pageId}`;
 const VIEW_TOPIC_KEY = (pageId: number) => `kimo_ai_viewtopic_${pageId}`;
 /** 各会话最近生成的 View 文章简介持久化 key（AI 记忆用，避免每次对话重读整篇文章） */
 const VIEW_INTRO_KEY = (pageId: number) => `kimo_view_intro_${pageId}`;
+
+/** 单次补全（学习页 / 摘要等非聊天场景） */
+async function completeText(
+  cfg: AIChatConfig,
+  system: string,
+  user: string,
+): Promise<string> {
+  const res = await fetch(
+    cfg.endpoint.replace(/\/+$/, "") + "/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cfg.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: cfg.model,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        temperature: 0.6,
+        max_tokens: resolveMaxTokens(cfg.model, 2400),
+        stream: false,
+      }),
+    },
+  );
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const j = (await res.json()) as {
+    choices?: { message?: { content?: string } }[];
+  };
+  return String(j?.choices?.[0]?.message?.content || "").trim();
+}
 
 /** 判断用户消息是否与当前 View 文章相关（决定是否注入整篇全文 —— token 优化） */
 function viewArticleRelevant(userMsg: string, topic: string): boolean {
@@ -1289,11 +1346,7 @@ export function AIChat({
   // 站点标签/图标：AI Chat 页面用当前 AI 机器人的名称与头像（Layout/SiteProvider 在 /ai 路径已跳过站点标题设置，避免覆盖）
   useEffect(() => {
     document.title = config.botName || "AI";
-    if (config.avatar) {
-      const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
-      if (link) link.href = resolveAsset(config.avatar);
-    }
-  }, [config.botName, config.avatar]);
+  }, [config.botName]);
   const [sessions, setSessions] = useState<Session[]>(() => {
     try {
       const r = localStorage.getItem(SESSION_STORAGE(pageId));
@@ -1351,23 +1404,18 @@ export function AIChat({
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   const [localCfg, setLocalCfg] = useState(() => getLocalCfg(pageId));
-  // 自定义模型开关：关闭后不再识别为自定义（本地配置保留，重新开启即恢复）
-  const [customModelOn, setCustomModelOn] = useState(() => {
-    // 显式关闭("0")必须尊重用户选择；"1"=开启；从未设置过则按旧数据迁移（已配置本地 API 视为开启）
-    const raw = lsGet("kimo_ai_custom_model");
-    if (raw === "0") return false;
-    if (raw === "1") return true;
-    return hasLocalApi(getLocalCfg(pageId));
-  });
-  const toggleCustomModel = useCallback(() => {
-    setCustomModelOn((v) => {
-      const n = !v;
-      saveCustomModelOn(n);
-      return n;
-    });
-    queueBackupSync("settings"); // 设置变更 → 自动备份
-  }, []);
+  /** 原生工具调用（pi-agent-core Agent 模式）：默认开启，不支持 tools 时自动回退 */
+  const [agentNativeTools] = useState(() => loadAgentNativeTools());
   const [apiModalOpen, setApiModalOpen] = useState(false);
+  /** 主区域视图：chat=对话；kb/plugins/settings 为全屏独立页（保留侧边栏+顶栏） */
+  const [mainView, setMainView] = useState<
+    "chat" | "kb" | "plugins" | "settings" | "study"
+  >("chat");
+  /** 顶栏高度（全屏页从顶栏下方开始，不遮挡顶栏） */
+  const [headerH, setHeaderH] = useState(56);
+  const headerRef = useRef<HTMLDivElement>(null);
+  /** 会话搜索 */
+  const [wsQuery, setWsQuery] = useState("");
   const [articleOpen, setArticleOpen] = useState(false);
   const [agentOpen, setAgentOpen] = useState(() => {
     try {
@@ -1462,14 +1510,17 @@ export function AIChat({
     return undefined;
   });
   const [agentTab, setAgentTab] = useState<
-    "web" | "kb" | "edit" | "settings" | "live2d"
+    "artifacts" | "kb" | "edit" | "settings" | "live2d"
   >(() => {
     try {
       const s = JSON.parse(
         localStorage.getItem(AGENT_STATE_KEY(pageId)) || "{}",
       );
+      // 历史持久值 web（旧 View tab）统一映射到产物
+      if (s.tab === "web") return "artifacts";
       if (
-        s.tab === "web" ||
+        s.tab === "artifacts" ||
+        s.tab === "kb" ||
         s.tab === "edit" ||
         s.tab === "settings" ||
         s.tab === "live2d"
@@ -1489,6 +1540,21 @@ export function AIChat({
       return undefined;
     },
   );
+  /** 本轮累计 token 用量（含服务端提示词缓存命中），供底部 powerline 状态栏展示 */
+  const [agentUsage, setAgentUsage] = useState<
+    import("../lib/agent/piRunner").TokenUsage | undefined
+  >(undefined);
+  /** 顶栏高度测量（全屏页定位用） */
+  useEffect(() => {
+    const el = headerRef.current;
+    if (!el) return;
+    const update = () => setHeaderH(el.offsetHeight);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   /** 当前会话浏览生成的 View 文章话题（用于让 AI 读取文章并支持对话续优化） */
   const [viewTopic, setViewTopic] = useState("");
   // Agent 面板状态持久化：刷新后恢复打开状态 / tab / 地址 / 编辑内容
@@ -1571,6 +1637,36 @@ export function AIChat({
       }
     | undefined
   >();
+  /** 本会话产物（文章/文档/搜索/知识条/图片/笔记）；View 内容也是其中一项 */
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [activeArtifactId, setActiveArtifactId] = useState<
+    string | undefined
+  >();
+  const refreshArtifacts = useCallback(() => {
+    setArtifacts(listArtifacts(pageId, activeId));
+  }, [pageId, activeId]);
+  const deleteArtifact = useCallback(
+    (id: string) => {
+      removeArtifact(pageId, activeId, id);
+      setArtifacts(listArtifacts(pageId, activeId));
+      setActiveArtifactId((cur) => (cur === id ? undefined : cur));
+    },
+    [pageId, activeId],
+  );
+  /** Agent 面板浏览完成（文章/网页）→ 落库为产物并选中（View 合并进产物的关键一环） */
+  const onBrowseArtifact = useCallback(
+    (input: BrowseArtifactInput) => {
+      const art = upsertArtifact(pageId, { sessionId: activeId, ...input });
+      setArtifacts(listArtifacts(pageId, activeId));
+      setActiveArtifactId(art.id);
+    },
+    [pageId, activeId],
+  );
+  // 切会话 / 首次加载：幂等回填历史 View 文章为产物，并刷新列表
+  useEffect(() => {
+    migrateArtifactsFromSearchCache(pageId);
+    setArtifacts(listArtifacts(pageId, activeId));
+  }, [pageId, activeId]);
   const [agentWidth, setAgentWidth] = useState(() => {
     // 拖拽允许范围 [300, 视口-360]（给聊天区留空间），这里保持一致，避免拖宽后刷新被丢弃
     const maxW =
@@ -1596,6 +1692,25 @@ export function AIChat({
   const [chatFontSize, setChatFontSize] = useState<ChatFontSize>(() =>
     loadChatFontSize(),
   );
+  /** 自定义头像：默认 null = 不展示头像（用户要求）；本机保存，支持上传图片/图片地址 */
+  const [userAvatar, setUserAvatar] = useState<string | null>(() =>
+    loadAvatar(pageId),
+  );
+  /** 实际生效头像：本机自定义优先，其次站点配置；两者都无时不渲染任何占位 */
+  const avatar = userAvatar || config.avatar || undefined;
+  useEffect(() => {
+    setPageFavicon(avatar || settings.avatar || "/favicon.svg");
+  }, [avatar, settings.avatar]);
+  const setAvatarPersist = (v: string) => {
+    if (!saveAvatar(pageId, v)) return;
+    setUserAvatar(loadAvatar(pageId));
+    queueBackupSync("settings");
+  };
+  const clearAvatarPersist = () => {
+    clearAvatar(pageId);
+    setUserAvatar(null);
+    queueBackupSync("settings");
+  };
   const fontSizeCls =
     chatFontSize === "sm"
       ? "text-sm"
@@ -1618,7 +1733,7 @@ export function AIChat({
     setTtsVoice(v);
     saveTtsVoice(v);
   };
-  /** TTS 来源：backend=内置后端 /api/v1/tts；thirdparty=第三方地址 */
+  /** TTS 来源：backend=内置音源（同源 Worker /api/tts）；thirdparty=第三方地址 */
   const [ttsSource, setTtsSource] = useState<TtsSource>(() => loadTtsSource());
   const setTtsSourcePersist = (v: TtsSource) => {
     setTtsSource(v);
@@ -1652,11 +1767,31 @@ export function AIChat({
       prepareSpeaking();
       applyL2dModelEmotion("happy");
     }
-    speakAudio(url, {
-      volume: ttsVolumeValue(ttsVolume),
-      onEnd: () => stopSpeaking(),
-    });
+    const vol = ttsVolumeValue(ttsVolume);
+    const onEnd = () => stopSpeaking();
     toast("正在试听…");
+    // 与 playTTS 同一套兜底：优先缓存/AudioBuffer，失败后 <audio> 直连（第三方）→ 浏览器语音
+    getTtsAudio({
+      text: clean,
+      voice: ttsVoice,
+      source: ttsSource,
+      thirdPartyUrl: loadTtsAudioUrl(),
+    })
+      .then((r) => {
+        if (r?.arrayBuffer) {
+          speakAudioBuffer(r.arrayBuffer, { volume: vol, onEnd });
+          return;
+        }
+        if (
+          ttsSource === "thirdparty" &&
+          speakAudio(url, { volume: vol, onEnd })
+        )
+          return;
+        speakWithBrowser(clean, { volume: vol, onEnd });
+      })
+      .catch(() => {
+        speakWithBrowser(clean, { volume: vol, onEnd });
+      });
   }, [ttsSource, ttsVoice, ttsVolume, l2dEnabled]);
   /** 网络模式：Auto(智能,默认,先按速度回答，缺准确数据自动升级) / search(联网搜索并自动生成综合文章；原 view 已整合进 search) */
   const [netMode, setNetMode] = useState<ChatNetMode>(() => loadNetMode());
@@ -1735,45 +1870,9 @@ export function AIChat({
     });
   };
   const [limitReached, setLimitReached] = useState(false);
-  const [toolCalls, setToolCalls] = useState<ChatToolCall[]>(() => {
-    try {
-      const r = JSON.parse(
-        localStorage.getItem("kimo_ai_toolcalls_" + pageId) || "[]",
-      );
-      return Array.isArray(r)
-        ? r
-            .filter(
-              (t) =>
-                typeof t?.msgIdx === "number" &&
-                typeof t?.type === "string" &&
-                !t.pending,
-            )
-            // 兼容旧数据：网络搜索/浏览网页 → Search（历史卡片名统一；原 View 已整合进 Search）
-            .map((t) => ({
-              ...t,
-              type:
-                t.type === "search" ||
-                t.type === "网络搜索" ||
-                t.type === "view" ||
-                t.type === "浏览网页" ||
-                t.type === "View"
-                  ? "Search"
-                  : t.type,
-            }))
-        : [];
-    } catch {
-      return [];
-    }
-  });
-  // 工具卡持久化（刷新后保留历史；不含生成中 pending）
-  useEffect(() => {
-    try {
-      localStorage.setItem(
-        "kimo_ai_toolcalls_" + pageId,
-        JSON.stringify(toolCalls.filter((t) => !t.pending)),
-      );
-    } catch {}
-  }, [toolCalls, pageId]);
+  const [, setToolCalls] = useState<ChatToolCall[]>([]);
+  // 工具卡已不再展示/持久化，仅保留 setter 供旧通道代码无副作用地调用
+
   // 卡片点击后强制重新触发浏览（避免同关键词二次点击不生效）
   const [agentSearchNonce, setAgentSearchNonce] = useState(0);
   const [dailyUsed, setDailyUsed] = useState(() => {
@@ -1800,6 +1899,8 @@ export function AIChat({
   const bottomRef = useRef<HTMLDivElement>(null);
   const msgListRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  /** shell side（产物详情「让 AI 继续」）绕过 memo 的 send 引用 */
+  const sendRef = useRef<(text?: string) => void>(() => {});
   // 卸载/切换会话（AICenter 用 key 重挂载）时中止进行中的流式请求，避免已卸载组件继续 setState（浪费网络/主线程）
   useEffect(() => {
     return () => {
@@ -1819,17 +1920,6 @@ export function AIChat({
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
 
-  /** 工具卡按消息索引预计算（流式中 toolCalls 不变 → 映射引用稳定，配合 MessageItem memo 跳过无关消息重渲染） */
-  const toolCallsByMsg = useMemo(() => {
-    const map: Record<number, ChatToolCall[]> = {};
-    for (const tc of toolCalls) {
-      if (tc.sessionId !== activeId) continue;
-      // auto/fast 模式：隐藏所有指向 web 面板的工具卡（Search/View——不显示任何 view 入口）
-      if (tc.tab === "web" && searchMode !== "deep") continue;
-      (map[tc.msgIdx] ||= []).push(tc);
-    }
-    return map;
-  }, [toolCalls, activeId, searchMode]);
   /** 反馈评分缓存：msgHash → rating，跨渲染持久（流式/长会话避免对每条历史消息反复 localStorage 读） */
   const ratingCacheRef = useRef<Map<string, 0 | 1 | -1>>(new Map());
   /**
@@ -1857,28 +1947,9 @@ export function AIChat({
     }
     return map;
   }, [messages, pageId, streaming]);
-  /** 工具卡点击：按 tab 打开 Agent 面板（web 附带关键词触发搜索） */
-  const handleToolClick = useCallback(
-    (tc: ChatToolCall) => {
-      if (!tc.tab) return;
-      // auto/fast 下禁止通过工具卡打开 view 面板（Search/浏览卡点击不再进入 web 面板）
-      if (tc.tab === "web" && searchMode !== "deep") return;
-      const q =
-        tc.query ||
-        (tc.type === "Search" ? tc.detail.split(" ")[0] : undefined);
-      setAgentTab(tc.tab);
-      if (tc.tab === "web") {
-        setAgentInitUrl(q);
-        setAgentSearchNonce((n) => n + 1);
-      }
-      setAgentEditContent(undefined);
-      setAgentOpen(true);
-    },
-    [searchMode],
-  );
-  /** 消息「在 Agent 中打开」：切到 web 面板并载入首个 URL */
+  /** 消息「在 Agent 中打开」：切到产物面板并载入首个 URL（网页会落库成 web 产物） */
   const handleOpenAgent = useCallback((url: string | undefined) => {
-    setAgentTab("web");
+    setAgentTab("artifacts");
     setAgentInitUrl(url);
     setAgentEditContent(undefined);
     setAgentOpen(true);
@@ -1934,22 +2005,32 @@ export function AIChat({
   );
 
   // 有效配置：本地自定义 API/提示词（开关开启时生效）> 选中人设 > 机器人默认（非管理员各自本地设置）
-  const effLocal: LocalAIConfig = customModelOn
-    ? localCfg
-    : { endpoint: "", apiKey: "", model: "", prompt: "" };
+  const effLocal: LocalAIConfig = localCfg;
   const effCfg: AIChatConfig = mergeEffCfg(config, effLocal, activePromptIdx);
-  const hasCustom = customModelOn && hasLocalApi(localCfg);
+  const hasCustom = hasLocalApi(localCfg);
 
-  // 联网搜索统一走 DeepSeek Search API：把当前生效配置的 Key 注入搜索层
-  // （搜索模块不再自行猜 localStorage，多机器人/本机自定义模型都能取对 Key）
+  // 联网搜索统一走 DeepSeek Search API：优先用「搜索数据源」里的专用 Key，
+  // 留空则复用当前生效模型配置（多机器人/本机自定义模型都能取对 Key）
+  const [, setSearchKeyTick] = useState(0);
   useEffect(() => {
-    setDeepseekKeyProvider(() => ({
-      endpoint: effCfg.endpoint || "",
-      apiKey: effCfg.apiKey || "",
-    }));
+    const onKey = () => setSearchKeyTick((n) => n + 1);
+    window.addEventListener("kimo:searchkey:changed", onKey);
+    return () => window.removeEventListener("kimo:searchkey:changed", onKey);
+  }, []);
+  useEffect(() => {
+    setDeepseekKeyProvider(() => {
+      const own = loadSearchApiKey().trim();
+      if (own) return { endpoint: "https://api.deepseek.com", apiKey: own };
+      return {
+        endpoint: effCfg.endpoint || "",
+        apiKey: effCfg.apiKey || "",
+      };
+    });
   }, [effCfg.endpoint, effCfg.apiKey]);
-  /** 联网搜索是否可用（DeepSeek Key 已配置） */
-  const deepseekReady = !!effCfg.apiKey && isDeepseekEndpoint(effCfg.endpoint);
+  /** 联网搜索是否可用（专用 Key 或 DeepSeek 模型 Key） */
+  const deepseekReady =
+    !!loadSearchApiKey().trim() ||
+    (!!effCfg.apiKey && isDeepseekEndpoint(effCfg.endpoint));
   /** 满意度反馈：存储 + 偏好学习 + 搜索定式优化 */
   const handleFeedback = useCallback(
     (m: Message, rating: 1 | -1) => {
@@ -2181,6 +2262,8 @@ export function AIChat({
     setStick(true);
     setSidebarOpen(false);
     setLimitReached(false);
+    setMainView("chat"); // 新建会话 → 回到对话页
+    setAgentOpen(false);
     // 新建会话：清空上一会话遗留的工具卡/内嵌浏览/搜索结果等临时状态
     setToolCalls([]);
     setDialogResults([]);
@@ -2189,12 +2272,16 @@ export function AIChat({
     setAgentInitUrl(undefined);
     setAgentSearchNonce((n) => n + 1);
     setKbPickerOpen(false);
+    setArtifacts([]);
+    setActiveArtifactId(undefined);
   }, [sessions, saveSessions]);
 
   const selectSession = useCallback((id: string) => {
     setActiveId(id);
     setStick(true);
     setSidebarOpen(false);
+    setMainView("chat"); // 点击会话 → 无论当前在哪个全屏页都回到对话
+    setAgentOpen(false);
   }, []);
 
   const deleteSession = useCallback(
@@ -2214,8 +2301,9 @@ export function AIChat({
             ],
       );
       if (id === activeId) setActiveId((rest[0] || sessions[0]).id);
+      clearSessionArtifacts(pageId, id);
     },
-    [sessions, activeId, saveSessions],
+    [sessions, activeId, saveSessions, pageId],
   );
 
   // 侧边栏会话拖拽排序（HTML5 DnD，桌面端）：拖动卡片重排，顺序随 sessions 持久化；重命名中禁止拖拽
@@ -2328,6 +2416,7 @@ export function AIChat({
       if (!ttsOn) return;
       if (speakingIdx === idx) {
         ttsPlayRef.current++; // 使 in-flight 合成作废
+        stopBrowserSpeak();
         stopSpeaking();
         setSpeakingIdx(-1);
         return;
@@ -2359,6 +2448,15 @@ export function AIChat({
         stopSpeaking();
         setSpeakingIdx(-1);
       };
+      // 合成失败兼底：第三方地址先试 <audio> 直连，否则用浏览器内置语音（保证能出声）
+      const playFallback = () => {
+        if (
+          ttsSource === "thirdparty" &&
+          speakAudio(url, { volume: vol, onEnd })
+        )
+          return;
+        speakWithBrowser(clean, { volume: vol, onEnd });
+      };
       // 速度优化：命中 TTS 缓存 → decode 后的 AudioBuffer 秒播（0 网络请求 + 口型第一帧即同步）；
       // 未命中 → 合成后同样走 AudioBuffer（播放起点精确），同时写缓存供下次秒播
       getTtsAudio({
@@ -2372,31 +2470,30 @@ export function AIChat({
           if (r?.arrayBuffer) {
             speakAudioBuffer(r.arrayBuffer, { volume: vol, onEnd });
           } else {
-            // 合成失败：回退 <audio> 直连（同 URL，兼容第三方静态音频）
-            speakAudio(url, { volume: vol, onEnd });
+            // 合成失败（后端 502 / 被拦 / 解码失败）→ 兼底，避免“没声音”
+            playFallback();
           }
         })
         .catch(() => {
-          if (token === ttsPlayRef.current) {
-            speakAudio(url, { volume: vol, onEnd });
-          }
+          if (token === ttsPlayRef.current) playFallback();
         });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [speakingIdx, l2dEnabled, ttsOn, ttsVolume, ttsVoice, ttsSource],
   );
 
-  // 知识库：根据选择 + 本地笔记组装文本（KbModal 保存后调用 refreshKb 刷新缓存）
+  // 知识库文本：同步读取本机知识条目（不再拉文章/分类，零网络开销）
   const refreshKb = useCallback(async () => {
     try {
-      const sel = getKbSelections(pageId);
-      const notes = getKbNotes();
-      const text = await assembleKnowledge(sel, notes);
-      setKbText(text);
+      setKbText(
+        formatKbEntriesForContext(
+          loadKbEntries().map((e) => ({ title: e.name, content: e.content })),
+        ),
+      );
     } catch {
       setKbText("");
     }
-  }, [pageId]);
+  }, []);
 
   // ---- Notion 同步：同步状态（侧滑栏加载图标）+ 初次同步 + 恢复重载（多端收敛）+ 卸载兜底 flush ----
   const [syncStatus, setSyncStatus] = useState<BackupSyncStatus>(() => ({
@@ -2608,7 +2705,7 @@ export function AIChat({
           : `https://www.google.com/search?q=${encodeURIComponent(target)}`;
         setAgentInitUrl(searchUrl);
       }
-      setAgentTab("web");
+      setAgentTab("artifacts");
       setAgentEditContent(undefined);
       setAgentOpen(true);
     }
@@ -2822,29 +2919,21 @@ export function AIChat({
     const kbKnowledge = (() => {
       try {
         const aiReadAll = localStorage.getItem("kimo_kb_ai_read_all") !== "0";
-        const notes = aiReadAll ? getKbNotes() : [];
+        const notes = aiReadAll
+          ? loadKbEntries().map((e) => ({ title: e.name, content: e.content }))
+          : [];
         const attachNotes = kbAttachments.map(
           (a: { title: string; content: string }) => ({
             title: a.title,
             content: a.content,
           }),
         );
-        const all = aiReadAll ? [...attachNotes, ...notes] : attachNotes;
-        const unique = new Map<string, { title: string; content: string }>();
-        for (const n of all) {
-          if (n.content && !unique.has(n.content)) unique.set(n.content, n);
-        }
-        const valid = [...unique.values()];
-        if (valid.length)
-          return (
-            "【知识库条目】\n" +
-            valid
-              .map((n) => "- " + n.title + "：" + clamp(n.content, 600))
-              .join("\n")
-              .slice(0, 6000)
-          );
-      } catch {}
-      return "";
+        return formatKbEntriesForContext(
+          aiReadAll ? [...attachNotes, ...notes] : attachNotes,
+        );
+      } catch {
+        return "";
+      }
     })();
     // 每次发送时读取当前 View 文章：token 优化——仅当用户消息与浏览文章相关时才注入整篇全文，
     // 否则只注入 AI 已记忆的简短简介（viewIntro），避免每次对话重复搬运整篇文章
@@ -2890,34 +2979,187 @@ export function AIChat({
     } else {
       notionIntent = isNotionQuery(t);
     }
+    // 原生工具调用通道（pi-agent-core）：默认开启，模型不支持 tools 时自动回退旧 [TAG:] 通道
+    const msgIdx = messages.length + 1;
+    const nativeEnabled =
+      agentNativeTools &&
+      getToolSupport(effCfg.endpoint, effCfg.model) !== "unsupported";
+    let agentUsed = false;
+    /** 本轮实际执行过的工具名（双通道去重依据） */
+    const ranTools = new Set<string>();
     try {
       beginStreaming();
-      const result = await streamChat(
-        effCfg,
-        injectAttachments(recent),
-        upsertAssistant,
-        ctrl.signal,
-        summary,
-        kbKnowledge || kbText,
-        memory,
-        web,
-        searchMode !== "fast",
-        browseAgentOn,
-        viewArticle,
-        viewIntroText,
-        personaKnowledge,
-        searchMode === "auto",
-        searchMode === "fast",
-        lorePrompt,
-        personaMode === "role",
-        l2dEnabled,
-        ttsOn && (ttsSource === "backend" || !!loadTtsAudioUrl()),
-        siteDoc,
-        knowledgeFusion,
-        notion,
-        notionIntent,
-      );
-      reply = result.content;
+      if (nativeEnabled) {
+        const injected = injectAttachments(recent);
+        const historyMsgs = injected.slice(0, -1).map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
+        const userText = injected[injected.length - 1]?.content || t;
+        const agentSystem = assembleSystem({
+          knowledge: kbKnowledge,
+          memory,
+          personaKnowledge,
+          summary,
+          web,
+          viewArticle,
+          viewIntro: viewIntroText,
+          siteDoc,
+          knowledgeFusion,
+          notion,
+          notionIntent,
+          lorePrompt,
+          systemPrompt: effCfg.systemPrompt,
+          pureRole: personaMode === "role",
+          webTools: searchMode !== "fast",
+          browseMode: browseAgentOn,
+          autoMode: searchMode === "auto",
+          fastMode: searchMode === "fast",
+          l2dEnabled,
+          ttsMode: ttsOn && (ttsSource === "backend" || !!loadTtsAudioUrl()),
+          agentNative: true,
+          artifactsBrief: formatArtifactsBrief(listArtifacts(pageId, activeId)),
+        });
+        const res = await runAgentTurn({
+          cfg: effCfg,
+          systemPrompt: agentSystem,
+          history: historyMsgs,
+          userText,
+          signal: ctrl.signal,
+          onUsage: setAgentUsage,
+          toolContext: {
+            pageId,
+            sessionId: activeId,
+            mode: searchMode,
+            webEnabled: searchMode !== "fast",
+            notionToken: hasNotionCfg() ? loadNotionCfg().token : undefined,
+            notionDbId: loadNotionDbId() || undefined,
+            openPanel: (tab, artifactId, force) => {
+              setAgentTab(tab);
+              if (artifactId) setActiveArtifactId(artifactId);
+              if (force || window.innerWidth >= 1024) {
+                setAgentOpen(true);
+                setAgentEditContent(undefined);
+              }
+            },
+            onArtifactRemoved: deleteArtifact,
+          },
+          onToken: upsertAssistant,
+          onToolStart: (info) => {
+            ranTools.add(info.toolName);
+            const ui = toolUi(info.toolName);
+            const a = (info.args || {}) as {
+              query?: string;
+              topic?: string;
+              title?: string;
+              keyword?: string;
+              url?: string;
+              commands?: string;
+            };
+            const detail = String(
+              a.query ||
+                a.topic ||
+                a.title ||
+                a.keyword ||
+                a.url ||
+                a.commands ||
+                "",
+            ).slice(0, 60);
+            setToolCalls((prev) => [
+              ...prev,
+              {
+                msgIdx,
+                type: ui.type,
+                detail,
+                tab: ui.tab,
+                query: a.query || a.topic,
+                pending: true,
+                sessionId: activeId,
+                toolCallId: info.toolCallId,
+              },
+            ]);
+          },
+          onToolEnd: (info) => {
+            setToolCalls((prev) =>
+              prev.map((tc) =>
+                tc.toolCallId === info.toolCallId
+                  ? { ...tc, pending: false }
+                  : tc,
+              ),
+            );
+          },
+          onArtifact: (artifact) => {
+            refreshArtifacts();
+            setActiveArtifactId(artifact.id);
+            // 工具卡 → 结果卡：把产物挂到本轮最近一张尚未关联产物的工具卡上
+            setToolCalls((prev) => {
+              let hit = -1;
+              for (let i = prev.length - 1; i >= 0; i--) {
+                if (prev[i].msgIdx === msgIdx && !prev[i].artifactId) {
+                  hit = i;
+                  break;
+                }
+              }
+              if (hit < 0) return prev;
+              return prev.map((tc, i) =>
+                i === hit
+                  ? {
+                      ...tc,
+                      pending: false,
+                      artifactId: artifact.id,
+                      artifactKind: artifact.kind,
+                      artifactTitle: artifact.title,
+                      chars: artifact.content.length,
+                      sourceCount: artifact.sources?.length || 0,
+                    }
+                  : tc,
+              );
+            });
+          },
+        });
+        if (res.toolsUnsupported) {
+          // 记住该 endpoint+model 不支持原生 tools，下一轮直接走旧通道
+          markToolSupport(effCfg.endpoint, effCfg.model, "unsupported");
+        } else if (res.aborted) {
+          return;
+        } else if (res.content) {
+          reply = res.content;
+          agentUsed = true;
+        } else if (res.errorMessage) {
+          reply = isContentBlocked(new Error(res.errorMessage))
+            ? "这个话题涉及敏感或违规内容，我这边不太方便搜索和展示，咱们换个话题聊聊吧。"
+            : `错误：${res.errorMessage}`;
+          agentUsed = true;
+        }
+      }
+      if (!agentUsed) {
+        const result = await streamChat(
+          effCfg,
+          injectAttachments(recent),
+          upsertAssistant,
+          ctrl.signal,
+          summary,
+          kbKnowledge,
+          memory,
+          web,
+          searchMode !== "fast",
+          browseAgentOn,
+          viewArticle,
+          viewIntroText,
+          personaKnowledge,
+          searchMode === "auto",
+          searchMode === "fast",
+          lorePrompt,
+          personaMode === "role",
+          l2dEnabled,
+          ttsOn && (ttsSource === "backend" || !!loadTtsAudioUrl()),
+          siteDoc,
+          knowledgeFusion,
+          notion,
+          notionIntent,
+        );
+        reply = result.content;
+      }
     } catch (e: unknown) {
       if ((e as Error).name === "AbortError") return;
       // 违规/敏感内容被模型或网关拒绝（400/403 内容策略）→ 友好兜底，不显示"错误：…"红字
@@ -2993,8 +3235,9 @@ export function AIChat({
     const viewCmd = viewClosed || viewOpen;
     const kbCmd = reply.match(/\[(?:KB|OPEN_KB|知识库)(?::\s*([^\]]+))?\]/);
     const kbSaveCmd = parseKbTool(reply);
-    // 工具卡/内嵌浏览挂到 AI 消息底部（messages 是发送前的快照：用户消息在 messages.length，AI 回复在 +1）
-    const msgIdx = messages.length + 1;
+    // 双通道去重：原生通道已用工具完成的事，不再重复执行同名 [TAG:]
+    const tagGate = createTagGate({ agentUsed, ranTools });
+    // 工具卡/内嵌浏览挂到 AI 消息底部（msgIdx 已在发送前算好：用户消息在 messages.length，AI 回复在 +1）
     // 电脑端工具触发后自动打开 Agent 面板；手机端仅展示小卡片，用户点击卡片才打开
     const autoOpenAgent = () => {
       if (window.innerWidth >= 1024) setAgentOpen(true);
@@ -3040,7 +3283,7 @@ export function AIChat({
       // 防线（关键）：仅 Deep 模式可触发 view 生成/打开面板；
       // auto/fast 一律直接忽略——即使未来新增任何误调路径也绝不自动打开 view
       if (searchMode !== "deep") return;
-      setAgentTab("web");
+      setAgentTab("artifacts");
       setAgentInitUrl(q);
       autoOpenAgent();
       if (!opts?.keepReply) setBrowseNote(q.slice(0, 60));
@@ -3050,7 +3293,7 @@ export function AIChat({
           msgIdx,
           type: label,
           detail: q.slice(0, 60),
-          tab: "web",
+          tab: "artifacts",
           query: q,
           pending: true,
           sessionId: activeId,
@@ -3065,6 +3308,37 @@ export function AIChat({
           // 生成成功：记录当前 View 文章话题，供 AI 读取 / 对话续优化
           if (r && r.article) {
             changeViewTopic(q);
+            // 产物与 View 合并：文章同时作为本会话的一项 article 产物
+            const art = upsertArtifact(pageId, {
+              sessionId: activeId,
+              kind: "article",
+              title: q,
+              topic: q,
+              content: r.article,
+              msgIdx,
+              sources: (r.sources || [])
+                .filter((s) => !!s.url)
+                .slice(0, 8)
+                .map((s) => ({ title: s.title || s.url, url: s.url })),
+            });
+            refreshArtifacts();
+            setActiveArtifactId(art.id);
+            // 工具卡升级为结果卡：回填产物 id/字数/来源数，卡片可直接打开产物
+            setToolCalls((prev) =>
+              prev.map((tc) =>
+                tc.msgIdx === msgIdx && tc.query === q
+                  ? {
+                      ...tc,
+                      pending: false,
+                      artifactId: art.id,
+                      artifactKind: "article" as const,
+                      artifactTitle: art.title,
+                      chars: r.article.length,
+                      sourceCount: art.sources?.length || 0,
+                    }
+                  : tc,
+              ),
+            );
             // View 生成完整后：AI 以角色人格提炼简短介绍 → 直接以角色口吻追加到对话（不套模板）
             // + 存入记忆（后续对话引用省 token）
             if (r.article.trim()) {
@@ -3153,20 +3427,22 @@ export function AIChat({
             (searchErr ? `（原因：${searchErr}）` : "") +
             "。请基于你已有的知识回答用户的问题，并在结尾如实告知用户「未能搜索到相关网络资料，以上回答基于既有知识」" +
             (searchErr.includes("Key") || searchErr.includes("余额")
-              ? "，并提示用户检查设置 → 模型API配置中的 DeepSeek Key"
+              ? "，并提示用户检查设置 → 模型 API 中的 DeepSeek Key"
               : "") +
             "。";
         if (webBlock) {
           // 折叠结果卡：只在真正基于搜索结果重答时展示（含复用预搜结果的情况），
           // 覆盖上一轮残留卡片，避免「搜到资料却无后续回答」的残留
           if (hasResults) {
+            const filtered = filterSensitiveResults(results!);
             setDialogResults(
-              filterSensitiveResults(results!).map((r) => ({
+              filtered.map((r) => ({
                 title: r.title,
                 url: r.url,
                 source: r.source,
               })),
             );
+            // 搜索结果只留在对话内（不再每次搜索都新建产物，避免产物面板被刷屏）
           } else {
             // 无结果：不保留上一轮残留卡片
             setDialogResults([]);
@@ -3179,7 +3455,7 @@ export function AIChat({
               upsertAssistant,
               ctrl.signal,
               summary,
-              kbKnowledge || kbText,
+              kbKnowledge,
               memory,
               webBlock,
               true,
@@ -3236,7 +3512,7 @@ export function AIChat({
       return newReply;
     };
 
-    if (viewCmd) {
+    if (viewCmd && tagGate.view) {
       const vc = (viewCmd[1] || "").trim();
       // 判断是「更新当前浏览文章」（有浏览文章且内容为完整长文）还是「请求生成新文章」
       const looksLikeArticle = vc.length > 80 || vc.includes("\n\n");
@@ -3244,7 +3520,18 @@ export function AIChat({
         // AI 基于当前浏览文章输出优化后的完整文章 → 更新 View 面板（写缓存 + 重触发浏览；仅 Deep 模式可调用 View，auto/fast 不碰）
         if (vc) {
           writeSearchCache(viewTopic, { article: vc });
-          setAgentTab("web");
+          // 同步更新对应产物（同 topic 命中即覆盖，不会新建重复项）
+          const art = upsertArtifact(pageId, {
+            sessionId: activeId,
+            kind: "article",
+            title: viewTopic,
+            topic: viewTopic,
+            content: vc,
+            msgIdx,
+          });
+          refreshArtifacts();
+          setActiveArtifactId(art.id);
+          setAgentTab("artifacts");
           setAgentInitUrl(viewTopic);
           setAgentEditContent(undefined);
           setAgentSearchNonce((n) => n + 1);
@@ -3255,7 +3542,7 @@ export function AIChat({
               msgIdx,
               type: "优化文章",
               detail: viewTopic.slice(0, 60),
-              tab: "web",
+              tab: "artifacts",
               query: viewTopic,
               sessionId: activeId,
             },
@@ -3279,7 +3566,7 @@ export function AIChat({
         reply = vc;
       }
       // Fast：忽略 [VIEW:]（纯本地快速，不联网不生成文章）
-    } else if (kbSaveCmd?.mode === "delete") {
+    } else if (kbSaveCmd?.mode === "delete" && tagGate.kbDelete) {
       // 知识库删除：按标题删除条目（自动同步删除对应的 Notion 页面）
       const kEntries = loadKbEntries();
       const target = kEntries.find(
@@ -3311,7 +3598,7 @@ export function AIChat({
           },
         ]);
       }
-    } else if (kbSaveCmd) {
+    } else if (kbSaveCmd && tagGate.kb) {
       // 知识库保存：本机 always + 按「知识库保存」目标（auto/本地/Notion）入队后台同步 Notion
       const res = await saveKbEntrySmart({
         title: kbSaveCmd.title,
@@ -3325,6 +3612,14 @@ export function AIChat({
       setAgentEditContent(kbSaveCmd.content);
       autoOpenAgent();
       if (res.error) toast(res.error);
+      upsertArtifact(pageId, {
+        sessionId: activeId,
+        kind: "kb",
+        title: kbSaveCmd.title,
+        content: kbSaveCmd.content,
+        msgIdx,
+      });
+      refreshArtifacts();
       setToolCalls((prev) => [
         ...prev,
         {
@@ -3335,7 +3630,7 @@ export function AIChat({
           sessionId: activeId,
         },
       ]);
-    } else if (kbSaveIntent) {
+    } else if (kbSaveIntent && !agentUsed) {
       // AI 漏发 [KB-SAVE:] 但用户明确要求保存 → 前端兜底直接保存，并让 AI 回复补充确认
       const res = await saveKbEntrySmart({
         title: kbSaveIntent.title,
@@ -3372,14 +3667,15 @@ export function AIChat({
         return prev;
       });
       reply += confirm;
-    } else if (browseCmd && searchMode === "deep") {
+    } else if (browseCmd && searchMode === "deep" && tagGate.browse) {
       // Deep：仅此模式可调用 View 页面（[BROWSE:url] 抓取并生成文章）；Auto/Fast 中用户粘贴 URL 已由顶部 urlMatch 自动抓取注入上下文
       setAgentEditContent(undefined);
       triggerBrowse(browseCmd[1], "Search", { keepReply: true });
     } else if (
-      searchCmd ||
-      // 兜底：AI 回复被截断在 '['（本应是 [SEARCH:...]）→ 视为搜索意图，用原查询重答
-      (searchMode === "auto" && isInfoQuery && /[\[【]\s*$/.test(reply))
+      tagGate.search &&
+      (searchCmd ||
+        // 兜底：AI 回复被截断在 '['（本应是 [SEARCH:...]）→ 视为搜索意图，用原查询重答
+        (searchMode === "auto" && isInfoQuery && /[\[【]\s*$/.test(reply)))
     ) {
       const sq = (searchCmd ? searchCmd[1] : "").trim() || t.trim();
       if (browseAgentOn) {
@@ -3391,7 +3687,7 @@ export function AIChat({
       }
       // Fast：webTools 已关闭，[SEARCH:] 不生效（忽略，不联网）
       setAgentEditContent(undefined);
-    } else if (editCmd) {
+    } else if (editCmd && tagGate.edit) {
       setAgentTab("edit");
       setAgentInitUrl(undefined);
       setAgentEditContent(editCmd[1].trim());
@@ -3425,6 +3721,7 @@ export function AIChat({
     // 显式搜索兜底：搜索模式开启时无需再说「搜索」，任何提问都自动生成文章
     // （除非 AI 已发工具指令或给出代码块）；桌面自动开面板、手机只出卡片
     if (
+      !agentUsed &&
       browseAgentOn &&
       !viewCmd &&
       !kbSaveCmd &&
@@ -3509,6 +3806,9 @@ export function AIChat({
     }
   };
 
+  // 「让 AI 继续」需要最新 send 闭包：每次渲染同步一次引用
+  sendRef.current = send;
+
   const lastAssistant = [...messages]
     .reverse()
     .find((m) => m.role === "assistant");
@@ -3534,29 +3834,47 @@ export function AIChat({
     setAgentOpen(false);
   }, [refreshKb]);
   const consumeKbOpen = useCallback(() => setAgentKbOpen(undefined), []);
+  /** 侧边栏导航：切主视图（离开对话页时关闭右侧面板，避免两个面板同时存在） */
+  const goNav = useCallback((id: string) => {
+    if (id === "chat") {
+      setMainView("chat");
+    } else if (
+      id === "kb" ||
+      id === "plugins" ||
+      id === "settings" ||
+      id === "study"
+    ) {
+      setMainView(id);
+      setAgentOpen(false);
+      setAgentEditContent(undefined);
+    }
+    if (window.innerWidth < 1024) setSidebarOpen(false);
+  }, []);
+
   const onCustomSaved = useCallback(() => {
     setLocalCfg(getLocalCfg(pageId));
-    setCustomModelOn(true);
-    saveCustomModelOn(true);
   }, [pageId]);
 
-  // 沉浸卡片上可点击的工具按钮（View/搜索等）：显示当前会话最近的工具指令，
-  // 不限于最后一条 AI 消息——方便用户随时点击打开 View/搜索（搜索后按钮常驻可点）
-  // useMemo：父组件重渲染（流式/输入等）时跳过重复 sort/filter/slice
-  // 注意：必须放在早期 return（consent/adminOnly/未配置）之前，否则违反 Rules of Hooks
-  const immersiveTools = useMemo(
-    () =>
-      toolCalls
-        .filter(
-          (tc) =>
-            tc.sessionId === activeId &&
-            // auto/fast 模式：隐藏指向 web 面板的工具卡（不显示 view 入口）
-            !(tc.tab === "web" && searchMode !== "deep"),
-        )
-        .sort((a, b) => (b.msgIdx ?? 0) - (a.msgIdx ?? 0))
-        .slice(0, 3),
-    [toolCalls, activeId, searchMode],
+  /** 学习页：直接用当前模型生成课件/题目 */
+  const generateStudy = useCallback(
+    (prompt: string) =>
+      completeText(
+        effCfgRef.current,
+        "你是严谨、耐心的中文学习教练。输出 Markdown：公式用 $...$，代码块标注语言；不确定的事实要说明。",
+        prompt,
+      ),
+    [],
   );
+
+  // 「让 AI 继续」：产物详情里的续优化入口，需保持引用稳定（AgentPanel 是 memo 组件）
+  const askAgent = useCallback((text: string) => {
+    void sendRef.current(text);
+  }, []);
+
+  // 工具调用卡片已从 UI 移除：保持空数据，旧渲染分支自然不生效
+  const immersiveTools: ChatToolCall[] = [];
+  /** 本轮实时活动（工具调用）：已并入状态行，不再单独展示 */
+  const liveActivities: ActivityItem[] = [];
 
   // Agent 面板「设置」tab 数据（desktop/mobile 双渲染共用一份；useMemo 稳定引用配合 AgentPanel memo）
   const settingsData: AgentSettingsProps = useMemo(
@@ -3575,8 +3893,6 @@ export function AIChat({
         queueBackupSync("settings"); // 设置变更 → 自动备份
       },
       onCustomSaved,
-      customModelOn,
-      onToggleCustomModel: toggleCustomModel,
       allowCustomApi: customApiEnabled,
       ttsOn,
       onToggleTts: toggleTts,
@@ -3587,6 +3903,9 @@ export function AIChat({
       onTestTts: testTts,
       kbStoreMode,
       onSetKbStoreMode: changeKbStoreMode,
+      avatar,
+      onSetAvatar: setAvatarPersist,
+      onClearAvatar: clearAvatarPersist,
     }),
     [
       pageId,
@@ -3598,8 +3917,6 @@ export function AIChat({
       deepseekReady,
       chatFontSize,
       onCustomSaved,
-      customModelOn,
-      toggleCustomModel,
       customApiEnabled,
       ttsOn,
       toggleTts,
@@ -3611,47 +3928,52 @@ export function AIChat({
       kbStoreMode,
       changeKbStoreMode,
       refreshKb,
+      avatar,
+      setAvatarPersist,
+      clearAvatarPersist,
     ],
   );
 
   if (!consented) {
     return (
-      // 手机适配：h-full 占满父容器 + 外层滚动；子元素 m-auto —— 内容少居中、内容多可从顶滚到底部（同意按钮可滚动到）
-      <div className="flex h-full w-full overflow-y-auto bg-gray-50 px-4 py-8 dark:bg-gray-950">
-        {/* 入场动画：缩放 + 淡入（比大幅上滑更柔和，适合全屏居中卡片） */}
-        <div className="m-auto w-full max-w-xl animate-[kpop_0.45s_ease-out] overflow-hidden rounded-3xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-900">
-          {/* 顶部：纯文字欢迎（无彩色图标） */}
-          <div className="animate-[kfade_0.4s_ease-out_0.05s_both] bg-gradient-to-b from-gray-50 to-transparent px-6 pb-6 pt-8 text-center dark:from-gray-800/40">
-            <h3 className="text-xl font-semibold tracking-tight text-gray-900 dark:text-gray-100">
+      // 手机：整屏 sheet（无外边距）+ 须知区独立滚动 + 底部吸附同意栏；
+      // 桌面（sm+）：居中卡片。父级 #root 已锁 100dvh，h-full 可用。
+      <div className="flex h-full w-full flex-col bg-bg sm:items-center sm:justify-center sm:p-6">
+        <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-surface sm:h-auto sm:max-h-[calc(100dvh-3rem)] sm:max-w-xl sm:animate-[kpop_0.35s_ease-out] sm:rounded-sheet sm:border sm:border-line">
+          {/* 顶部：纯文字欢迎（无渐变、无彩色图标） */}
+          <header className="shrink-0 animate-[kfade_0.3s_ease-out_both] border-b border-line px-5 pb-3.5 pt-safe text-center sm:px-6 sm:pt-6">
+            <h1 className="text-[17px] font-semibold tracking-tight text-fg">
               {config.botName || "AI 助手"}
-            </h3>
-            <p className="mt-1 text-sm text-gray-400">
+            </h1>
+            <p className="mt-1 text-[13px] leading-relaxed text-fg-muted">
               开始使用前，请阅读并同意以下须知
             </p>
-          </div>
+          </header>
 
-          {/* 须知卡片区（Kimo 风格：圆角卡片 + 左侧灰条标题） */}
-          <div className="space-y-2.5 px-5 pb-6 sm:px-7">
-            <section className="animate-[kfade_0.4s_ease-out_0.12s_both] rounded-2xl border border-gray-100 bg-gray-50/60 p-3.5 dark:border-gray-800 dark:bg-gray-800/40">
-              <p className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">
-                <span className="h-3 w-1 rounded-full bg-gray-300 dark:bg-gray-600" />
+          {/* 须知区：手机独立滚动，底栏按钮始终可见 */}
+          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain px-4 py-3 sm:px-6">
+            <section className="rounded-card border border-line bg-sunken p-3">
+              <p className="flex items-center gap-1.5 text-[13px] font-semibold text-fg">
+                <span className="h-3 w-0.5 rounded-full bg-line-strong" />
                 数据与隐私
               </p>
-              <ul className="mt-2 space-y-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+              <ul className="mt-1.5 space-y-1 text-[13px] leading-relaxed text-fg-muted">
                 <li>
-                  对话记录和设置默认保存在本机；启用云端备份或 Notion 时，相关内容会发送到对应服务。
+                  对话记录和设置默认保存在本机；启用云端备份或 Notion
+                  时，相关内容会发送到对应服务。
                 </li>
                 <li>
-                  自定义 API 密钥保存在本机，发起对话时会发送给您配置的模型服务商。
+                  自定义 API
+                  密钥保存在本机，发起对话时会发送给您配置的模型服务商。
                 </li>
               </ul>
             </section>
-            <section className="animate-[kfade_0.4s_ease-out_0.2s_both] rounded-2xl border border-gray-100 bg-gray-50/60 p-3.5 dark:border-gray-800 dark:bg-gray-800/40">
-              <p className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">
-                <span className="h-3 w-1 rounded-full bg-gray-300 dark:bg-gray-600" />
+            <section className="rounded-card border border-line bg-sunken p-3">
+              <p className="flex items-center gap-1.5 text-[13px] font-semibold text-fg">
+                <span className="h-3 w-0.5 rounded-full bg-line-strong" />
                 内容声明
               </p>
-              <ul className="mt-2 space-y-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+              <ul className="mt-1.5 space-y-1 text-[13px] leading-relaxed text-fg-muted">
                 <li>
                   AI
                   回复由第三方模型生成，仅供参考，请自行判断准确性，重要信息请核实。
@@ -3670,25 +3992,28 @@ export function AIChat({
                 </li>
               </ul>
             </section>
-            <section className="animate-[kfade_0.4s_ease-out_0.28s_both] rounded-2xl border border-gray-100 bg-gray-50/60 p-3.5 dark:border-gray-800 dark:bg-gray-800/40">
-              <p className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">
-                <span className="h-3 w-1 rounded-full bg-gray-300 dark:bg-gray-600" />
+            <section className="rounded-card border border-line bg-sunken p-3">
+              <p className="flex items-center gap-1.5 text-[13px] font-semibold text-fg">
+                <span className="h-3 w-0.5 rounded-full bg-line-strong" />
                 联系与反馈
               </p>
-              <p className="mt-2 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+              <p className="mt-1.5 text-[13px] leading-relaxed text-fg-muted">
                 如有问题或建议，欢迎到{" "}
                 <a
                   href="https://github.com/ChanYiCYJ/lumia-chat/issues"
                   target="_blank"
                   rel="noreferrer"
-                  className="text-blue-600 hover:underline dark:text-blue-400"
+                  className="text-accent underline-offset-2 hover:underline"
                 >
                   GitHub Issues
                 </a>{" "}
                 反馈。
               </p>
             </section>
+          </div>
 
+          {/* 底部吸附同意栏：手机不滚动即可点，安全区避让 Home 指示条 */}
+          <div className="shrink-0 animate-[kfade_0.3s_ease-out_both] border-t border-line bg-surface px-4 pb-safe pt-3 sm:px-6">
             <button
               onClick={() => {
                 setConsented(true);
@@ -3699,10 +4024,10 @@ export function AIChat({
                   );
                 } catch {}
               }}
-              className="mt-4 flex w-full animate-[kfade_0.4s_ease-out_0.36s_both] items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white py-3 text-sm font-medium text-gray-700 transition hover:border-gray-300 hover:bg-gray-50 active:scale-[0.98] dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
+              className="flex min-h-11 w-full items-center justify-center gap-2 rounded-control border border-line-strong bg-surface px-4 text-sm font-medium text-fg transition hover:bg-sunken active:scale-[0.99]"
             >
               <svg
-                className="h-4 w-4 text-gray-400"
+                className="h-4 w-4 text-fg-muted"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
@@ -3725,17 +4050,17 @@ export function AIChat({
   // 仅管理员可用的助手：普通访客无法访问
   if (config.adminOnly && !canManage) {
     return (
-      <div className="flex h-full w-full items-center justify-center px-4">
-        <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white p-8 text-center dark:border-gray-700 dark:bg-gray-900">
-          <p className="text-base font-medium text-gray-700 dark:text-gray-300">
+      <div className="flex h-full w-full items-center justify-center px-4 pb-safe pt-safe">
+        <div className="w-full max-w-md rounded-card border border-line bg-surface p-6 text-center sm:p-8">
+          <p className="text-base font-medium text-fg">
             此 AI 助手仅管理员可用
           </p>
-          <p className="mt-1 text-sm text-gray-400">
+          <p className="mt-1 text-sm text-fg-muted">
             请联系管理员调整适用范围。
           </p>
           <Link
             to="/"
-            className="mt-4 inline-block text-sm text-blue-600 hover:underline dark:text-blue-400"
+            className="mt-4 inline-flex min-h-9 items-center text-sm text-accent hover:underline"
           >
             返回首页
           </Link>
@@ -3755,25 +4080,32 @@ export function AIChat({
           botName={config.botName || "AI"}
           onSaved={onCustomSaved}
         />
-        <div className="mx-auto max-w-md rounded-2xl border border-dashed border-gray-200 bg-gray-50/50 p-8 text-center text-sm text-gray-400 dark:border-gray-700 dark:bg-gray-800/50">
-          <p>AI 对话未配置。</p>
-          {!canManage && customApiEnabled ? (
-            <button
-              onClick={() => setApiModalOpen(true)}
-              className="mt-4 rounded-xl bg-gray-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-gray-700 dark:bg-gray-200 dark:text-gray-900"
-            >
-              在本机配置模型 API
-            </button>
-          ) : (
-            <p className="mt-2">请在后台「AI 管理」中配置。</p>
-          )}
+        <div className="flex h-full w-full items-center justify-center px-4 pb-safe pt-safe">
+          <div className="w-full max-w-md rounded-card border border-dashed border-line bg-sunken p-6 text-center sm:p-8">
+            <p className="text-sm font-medium text-fg">AI 对话未配置</p>
+            <p className="mt-1 text-[13px] leading-relaxed text-fg-muted">
+              填写接口地址、API Key 与模型即可开始对话（仅保存在本机）。
+            </p>
+            {!canManage && customApiEnabled ? (
+              <button
+                onClick={() => setApiModalOpen(true)}
+                className={`mt-4 w-full ${btnPrimary}`}
+              >
+                在本机配置模型 API
+              </button>
+            ) : (
+              <p className="mt-2 text-[13px] text-fg-muted">
+                请在后台「AI 管理」中配置。
+              </p>
+            )}
+          </div>
         </div>
       </>
     );
   }
 
   const iconBtn =
-    "grid h-9 w-9 shrink-0 place-items-center rounded-full text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800";
+    "grid h-9 w-9 shrink-0 cursor-pointer place-items-center rounded-control text-fg-muted transition hover:bg-sunken hover:text-fg";
 
   // 沉浸模式展示的 AI 最后一句（带索引，用于匹配工具卡）
   const lastAiIdx = [...messages]
@@ -3785,16 +4117,17 @@ export function AIChat({
     <div
       className={
         "flex h-full min-h-0 flex-col " +
-        (live2dImmersive ? "bg-transparent" : "bg-white dark:bg-gray-900")
+        (live2dImmersive ? "bg-transparent" : "bg-surface")
       }
     >
-      {/* 顶栏：左侧历史+机器人，右侧Agent+主题（沉浸模式保留，加毛玻璃背景；顶部安全区避让刘海） */}
+      {/* 顶栏：左侧历史+机器人，右侧Agent+主题（实色 + hairline，顶部安全区避让刘海） */}
       <div
+        ref={headerRef}
         className={
-          "flex shrink-0 items-center gap-1.5 border-b px-3 py-2 sm:px-4 " +
+          "flex shrink-0 items-center gap-1.5 border-b border-line bg-surface px-3 py-2 sm:px-4 " +
           (live2dImmersive
-            ? "border-gray-200/80 bg-white/90 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))] backdrop-blur dark:border-gray-800 dark:bg-gray-900/90"
-            : "border-gray-100 dark:border-gray-700")
+            ? "pb-2 pt-[max(0.5rem,env(safe-area-inset-top))]"
+            : "")
         }
       >
         {/* 左侧：历史按钮（桌面切换侧边栏收起/展开，移动端打开抽屉） */}
@@ -3843,10 +4176,7 @@ export function AIChat({
                   onClick={toggleBotMenu}
                   className="flex max-w-[170px] items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-700 transition hover:bg-gray-50 active:scale-95 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200"
                 >
-                  <BotAvatar
-                    src={config.avatar}
-                    name={config.botName || "AI"}
-                  />
+                  <BotAvatar src={avatar} name={config.botName || "AI"} />
                   <span className="min-w-0 truncate">
                     {config.botName || "AI"}
                   </span>
@@ -3901,16 +4231,12 @@ export function AIChat({
               </div>
             ) : (
               <div className="flex min-w-0 items-center gap-2">
-                {config.avatar ? (
+                {avatar && (
                   <img
-                    src={config.avatar}
+                    src={avatar}
                     alt=""
                     className="h-7 w-7 shrink-0 rounded-full object-cover"
                   />
-                ) : (
-                  <span className="grid h-7 w-7 shrink-0 place-content-center rounded-full bg-gray-100 text-xs font-bold text-gray-500 dark:bg-gray-800 dark:text-gray-300">
-                    {(config.botName || "AI").slice(0, 2)}
-                  </span>
                 )}
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5">
@@ -3956,7 +4282,7 @@ export function AIChat({
                         /https?:\/\/[^\s<>"{}|\\^`\[\]]+/,
                       );
                       if (m) {
-                        setAgentTab("web");
+                        setAgentTab("artifacts");
                         setAgentInitUrl(m[0]);
                       }
                     }
@@ -4013,10 +4339,10 @@ export function AIChat({
               )}
               {/* 移动端小提示：浏览/知识库/编辑器 */}
               {agentHint && (
-                <span className="pointer-events-none absolute -bottom-9 right-0 z-30 whitespace-nowrap rounded-xl bg-gray-900 px-3 py-1.5 text-xs font-medium text-white shadow-lg animate-[kfade_0.3s_ease-out] dark:bg-gray-200 dark:text-gray-900">
+                <span className="pointer-events-none absolute -bottom-9 right-0 z-30 whitespace-nowrap rounded-xl bg-fg px-3 py-1.5 text-xs font-medium text-bg shadow-lg animate-[kfade_0.3s_ease-out]">
                   浏览 · 知识库 · 编辑器
                   <span
-                    className="absolute right-3 top-0 -translate-y-1/2 rotate-45 border-l border-t border-gray-900 bg-gray-900 dark:border-gray-200 dark:bg-gray-200"
+                    className="absolute right-3 top-0 -translate-y-1/2 rotate-45 border-l border-t border-fg bg-fg"
                     style={{ width: 6, height: 6 }}
                   />
                 </span>
@@ -4053,16 +4379,12 @@ export function AIChat({
               </svg>
               <span className="hidden text-sm sm:block">返回</span>
             </Link>
-            {config.avatar ? (
+            {avatar && (
               <img
-                src={config.avatar}
+                src={avatar}
                 alt=""
                 className="h-7 w-7 shrink-0 rounded-full object-cover"
               />
-            ) : (
-              <span className="grid h-7 w-7 shrink-0 place-content-center rounded-full bg-gray-100 text-xs font-bold text-gray-500 dark:bg-gray-800 dark:text-gray-300">
-                {(config.botName || "AI").slice(0, 2)}
-              </span>
             )}
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
@@ -4078,21 +4400,8 @@ export function AIChat({
       {/* 消息区：沉浸模式隐藏（角色全屏背景），正常模式显示消息列表 */}
       {!live2dImmersive && (
         <>
-          {/* 消息区（铺满的多重水印暗纹网格，不随消息滚动） */}
+          {/* 消息区（水印暗纹已移除：保持编辑式留白，不做 AI 味装饰） */}
           <div className="relative min-h-0 flex-1">
-            <div className="pointer-events-none absolute inset-0 z-0 select-none overflow-hidden">
-              <div className="grid h-full grid-cols-2 content-center gap-x-14 gap-y-20 px-4 opacity-20 sm:grid-cols-3">
-                {Array.from({ length: 12 }).map((_, i) => (
-                  <span
-                    key={i}
-                    className="rotate-[-16deg] whitespace-nowrap text-[10px] font-medium tracking-[0.2em] text-gray-400/60 dark:text-gray-500/40"
-                  >
-                    AI 生成 · {effCfg.model || "AI"} ·{" "}
-                    {hasCustom ? "自定义" : "站点"}
-                  </span>
-                ))}
-              </div>
-            </div>
             <div
               ref={msgListRef}
               onScroll={onScroll}
@@ -4107,16 +4416,12 @@ export function AIChat({
                 )}
                 {messages.length === 0 ? (
                   <div className="flex flex-col items-center pt-[12vh] text-center">
-                    {config.avatar ? (
+                    {avatar && (
                       <img
-                        src={config.avatar}
+                        src={avatar}
                         alt={config.botName}
                         className="mb-4 h-16 w-16 rounded-full object-cover"
                       />
-                    ) : (
-                      <span className="mb-4 grid h-16 w-16 place-content-center rounded-full bg-gray-100 text-2xl font-bold text-gray-400 dark:bg-gray-800">
-                        AI
-                      </span>
                     )}
                     <p className="text-base font-medium text-gray-700 dark:text-gray-300">
                       {config.botName || "AI 助手"}
@@ -4143,39 +4448,46 @@ export function AIChat({
                           i === messages.length - 1 &&
                           m.role === "assistant"
                         }
-                        avatar={config.avatar}
+                        avatar={avatar}
                         botName={config.botName || "AI"}
                         fontSizeCls={fontSizeCls}
-                        toolCalls={toolCallsByMsg[i] || EMPTY_TOOLCALLS}
                         speakingIdx={speakingIdx}
                         ttsOn={ttsOn}
                         onSpeak={playTTS}
                         onOpenAgent={handleOpenAgent}
-                        onToolClick={handleToolClick}
                         feedbackRating={feedbackRatingMap[i] || 0}
                         onFeedback={handleMessageFeedback}
                       />
                     ))}
-                    {dialogResults.length > 0 && (
-                      <SearchResultsCard results={dialogResults} />
-                    )}
+                    {/* 极简执行态：一行状态（搜索/生成 + 当前动作 + 条数），无卡片无骸架 */}
                     {loading && (
-                      <div className="flex gap-3 py-4 sm:py-5">
-                        <span className="mt-0.5 grid h-8 w-8 shrink-0 place-content-center rounded-full bg-gray-200 text-xs font-bold text-gray-500 dark:bg-gray-800">
-                          AI
-                        </span>
-                        <div className="flex items-center gap-1.5 rounded-xl bg-gray-100 px-4 py-3 dark:bg-gray-800">
-                          <span className="h-2 w-2 animate-bounce rounded-full bg-gray-400" />
-                          <span
-                            className="h-2 w-2 animate-bounce rounded-full bg-gray-400"
-                            style={{ animationDelay: "0.15s" }}
-                          />
-                          <span
-                            className="h-2 w-2 animate-bounce rounded-full bg-gray-400"
-                            style={{ animationDelay: "0.3s" }}
-                          />
-                        </div>
-                      </div>
+                      <SearchStatusLine
+                        isSearch={!!(searchPlan || searching)}
+                        activity={liveActivities[liveActivities.length - 1]}
+                        count={dialogResults.length}
+                      />
+                    )}
+                    {/* 检索完成：一行文字入口，不加边框/背景 */}
+                    {!loading && dialogResults.length > 0 && (
+                      <button
+                        onClick={() => {
+                          setAgentTab("artifacts");
+                          setAgentOpen(true);
+                        }}
+                        className="inline-flex items-center gap-1 py-1 text-[11px] text-fg-muted transition hover:text-accent"
+                      >
+                        <svg
+                          className="h-3 w-3"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                        >
+                          <circle cx="11" cy="11" r="7" />
+                          <path d="M21 21l-4.35-4.35" strokeLinecap="round" />
+                        </svg>
+                        已检索 {dialogResults.length} 条 · 查看
+                      </button>
                     )}
                     {limitReached && !hasCustom && customApiEnabled && (
                       <div className="flex justify-center pt-3">
@@ -4212,7 +4524,7 @@ export function AIChat({
         <div className="mx-auto w-full max-w-3xl">
           {/* 沉浸模式：浮空展示 AI 最后一句（Markdown + 工具按钮 + 生成中加载）；新对话时给快捷提示词 */}
           {live2dImmersive && (
-            <div className="relative mb-2 animate-[kslideUp_0.3s_ease-out] rounded-2xl border border-gray-200 bg-white/85 px-3.5 py-2.5 text-sm leading-relaxed text-gray-700 backdrop-blur dark:border-gray-700 dark:bg-gray-900/85 dark:text-gray-200">
+            <div className="relative mb-2 animate-[kslideUp_0.3s_ease-out] rounded-card border border-line bg-surface px-3.5 py-2.5 text-sm leading-relaxed text-fg">
               {loading && !lastAi ? (
                 /* 新对话、生成中：统一分阶段加载打字机（搜索→生成 逐字切换，不再单独漂浮「正在搜索…」） */
                 <div className="flex items-center gap-1.5 text-gray-400 dark:text-gray-500">
@@ -4232,19 +4544,30 @@ export function AIChat({
                         {stripToolCmds(stripEmotionTag(lastAi.content))}
                       </span>
                     ) : (
-                      <MarkdownContent
-                        content={lastAi.content}
-                        fallback={
-                          immersiveTools.length
-                            ? `（${immersiveTools[0].type}：${immersiveTools[0].detail}）`
-                            : ""
-                        }
-                      />
+                      <MarkdownContent content={lastAi.content} fallback="" />
                     )}
                   </div>
-                  {/* 搜索结果卡：auto 重答产生的「已获取 N 条资料」折叠卡，沉浸模式下也显示（点击新标签开来源，不打开 Agent 面板） */}
+                  {/* 结果入口：一行文字，不占卡片空间 */}
                   {dialogResults.length > 0 && (
-                    <SearchResultsCard results={dialogResults} />
+                    <button
+                      onClick={() => {
+                        setAgentTab("artifacts");
+                        setAgentOpen(true);
+                      }}
+                      className="mt-1.5 inline-flex items-center gap-1 text-[11px] text-fg-muted transition hover:text-accent"
+                    >
+                      <svg
+                        className="h-3 w-3"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                      >
+                        <circle cx="11" cy="11" r="7" />
+                        <path d="M21 21l-4.35-4.35" strokeLinecap="round" />
+                      </svg>
+                      已检索 {dialogResults.length} 条 · 查看
+                    </button>
                   )}
                   {/* 工具按钮：View/搜索等，点击打开 Agent 面板；生成中显示加载 */}
                   {/* 手机适配：flex-nowrap + 横向滚动，多张卡片不换行（沉浸卡片空间本就紧张） */}
@@ -4252,33 +4575,23 @@ export function AIChat({
                     <div className="mt-2 flex flex-wrap gap-1.5 max-sm:flex-nowrap max-sm:overflow-x-auto no-scrollbar">
                       {immersiveTools.map((tc, j) => {
                         const dot: Record<string, string> = {
-                          保存知识库: "bg-emerald-500",
-                          编辑知识库: "bg-emerald-500",
-                          View: "bg-sky-500",
-                          Search: "bg-blue-500",
-                          优化文章: "bg-indigo-500",
+                          保存知识库: "bg-accent",
+                          编辑知识库: "bg-accent",
+                          View: "bg-fg-muted",
+                          Search: "bg-fg-muted",
+                          优化文章: "bg-fg-muted",
                           网络资料: "bg-amber-500",
-                          编辑文档: "bg-orange-500",
-                          打开知识库: "bg-teal-500",
+                          编辑文档: "bg-fg-muted",
+                          打开知识库: "bg-accent",
                         };
                         return (
                           <button
                             key={j}
                             onClick={() => {
                               if (!tc.tab) return;
-                              // auto/fast 下禁止通过工具卡打开 view 面板
-                              if (tc.tab === "web" && searchMode !== "deep")
-                                return;
-                              const q =
-                                tc.query ||
-                                (tc.type === "Search"
-                                  ? tc.detail.split(" ")[0]
-                                  : undefined);
                               setAgentTab(tc.tab);
-                              if (tc.tab === "web") {
-                                setAgentInitUrl(q);
-                                setAgentSearchNonce((n) => n + 1);
-                              }
+                              if (tc.artifactId)
+                                setActiveArtifactId(tc.artifactId);
                               setAgentEditContent(undefined);
                               setAgentOpen(true);
                             }}
@@ -4560,13 +4873,13 @@ export function AIChat({
               )}
             </div>
           )}
-          <div className="flex items-center gap-0.5 rounded-2xl border border-gray-200 bg-white p-1.5 transition hover:border-gray-300 focus-within:border-gray-400 focus-within:ring-2 focus-within:ring-gray-100 dark:border-gray-700 dark:bg-gray-800/70 dark:hover:border-gray-600 dark:focus-within:ring-gray-700/40">
+          <div className="flex items-center gap-0.5 rounded-card border border-line bg-surface p-1.5 transition hover:border-line-strong focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/15">
             {/* / 按钮：知识库弹窗（锚定弹窗位置） */}
             <div className="relative">
               <button
                 ref={kbAnchorRef}
                 onClick={() => {
-                  setKbPickerOpen(!kbPickerOpen);
+                  setKbPickerOpen((v) => !v);
                   setKbPickerSelected([]);
                 }}
                 className={
@@ -4644,7 +4957,7 @@ export function AIChat({
                 !input.trim() ||
                 cooldown > 0
               }
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gray-900 text-white transition hover:bg-gray-700 disabled:opacity-40 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-300"
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-line-strong bg-surface text-fg transition hover:bg-sunken disabled:cursor-not-allowed disabled:opacity-40"
             >
               {cooldown > 0 ? (
                 <span className="text-xs font-medium">{cooldown}</span>
@@ -4659,21 +4972,27 @@ export function AIChat({
               )}
             </button>
           </div>
-          <p className="mt-1.5 text-center text-[10px] text-gray-400/70 dark:text-gray-500/70">
-            Shift+Enter 换行 · AI 生成内容仅供参考
-          </p>
+          <div className="mt-1 flex flex-wrap items-center justify-center gap-x-2 gap-y-0.5 text-center text-[10px] text-gray-400/70 dark:text-gray-500/70">
+            <span>Shift+Enter 换行 · AI 生成内容仅供参考</span>
+            <span className="text-gray-300 dark:text-gray-600">|</span>
+            <PowerlineFooter
+              model={effCfg.model}
+              mode={searchMode}
+              usage={agentUsage}
+            />
+          </div>
         </div>
       </div>
     </div>
   );
 
   const sidebar = (
-    <div className="flex h-full w-64 flex-col bg-gray-100 dark:bg-gray-950">
-      {/* 顶部：新建会话（圆角卡片）+ 同步中加载指示 */}
+    <div className="flex h-full w-64 flex-col border-r border-line bg-bg">
+      {/* 顶部：新建会话（唯一主操作）+ 同步中加载指示 */}
       <div className="p-2.5 pb-1.5">
         <button
           onClick={newSession}
-          className="flex w-full items-center justify-center gap-2 rounded-lg border border-gray-200/70 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition hover:border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-gray-600 dark:hover:bg-gray-800"
+          className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-control border border-line-strong bg-surface px-3 py-2 text-sm font-medium text-fg transition hover:bg-sunken active:scale-[0.99]"
         >
           <svg
             className="h-4 w-4"
@@ -4687,7 +5006,7 @@ export function AIChat({
           新建会话
         </button>
         {syncStatus.state === "syncing" && (
-          <div className="mt-1.5 flex items-center justify-center gap-1.5 rounded-lg border border-gray-200/70 bg-white px-3 py-1.5 text-[11px] text-gray-400 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-400">
+          <div className="mt-1.5 flex items-center justify-center gap-1.5 rounded-control border border-line bg-surface px-3 py-1.5 text-[11px] text-fg-muted">
             <svg
               className="h-3 w-3 animate-spin text-amber-500"
               viewBox="0 0 24 24"
@@ -4710,6 +5029,80 @@ export function AIChat({
             正在同步到 Notion…
           </div>
         )}
+      </div>
+      {/* 主导航：对话 / 知识库 / 插件 / 学习 / 更多 */}
+      <nav className="space-y-0.5 px-2.5 pb-1.5">
+        {(
+          [
+            { id: "chat", label: "对话", d: "M4 6h16M4 12h16M4 18h10" },
+            {
+              id: "kb",
+              label: "知识库",
+              d: "M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25",
+            },
+            {
+              id: "plugins",
+              label: "插件",
+              d: "M14.25 6.087c0-.355.186-.676.401-.959.221-.29.349-.634.349-1.003 0-1.036-1.007-1.875-2.25-1.875s-2.25.84-2.25 1.875c0 .369.128.713.349 1.003.215.283.401.604.401.959v0a.64.64 0 01-.657.643 48.39 48.39 0 01-4.163-.3c.186 1.613.293 3.25.315 4.907a.656.656 0 01-.658.663v0c-.355 0-.676-.186-.959-.401a1.647 1.647 0 00-1.003-.349c-1.036 0-1.875 1.007-1.875 2.25s.84 2.25 1.875 2.25c.369 0 .713-.128 1.003-.349.283-.215.604-.401.959-.401v0c.31 0 .609.271.623.58.04.945.1 1.88.179 2.804",
+            },
+            {
+              id: "study",
+              label: "学习",
+              d: "M12 14l9-5-9-5-9 5 9 5zm0 0l6.16-3.422A12.083 12.083 0 0112 21a12.08 12.08 0 01-6.16-10.422L12 14z",
+            },
+          ] as const
+        ).map((it) => {
+          const on =
+            mainView === it.id || (it.id === "chat" && mainView === "chat");
+          return (
+            <button
+              key={it.id}
+              onClick={() => goNav(it.id)}
+              className={
+                "flex w-full cursor-pointer items-center gap-2 rounded-control px-2.5 py-1.5 text-[13px] transition " +
+                (on
+                  ? "bg-sunken font-medium text-fg"
+                  : "text-fg-muted hover:bg-sunken hover:text-fg")
+              }
+            >
+              <svg
+                className="h-4 w-4 shrink-0"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.7"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d={it.d} />
+              </svg>
+              {it.label}
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* 会话搜索（紧凑一行） */}
+      <div className="flex items-center gap-1 px-2.5 pb-1.5">
+        <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-control border border-line bg-surface px-2 py-1">
+          <svg
+            className="h-3.5 w-3.5 shrink-0 text-fg-muted"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+          >
+            <circle cx="11" cy="11" r="7" />
+            <path d="M21 21l-4.35-4.35" />
+          </svg>
+          <input
+            value={wsQuery}
+            onChange={(e) => setWsQuery(e.target.value)}
+            placeholder="搜索会话…"
+            className="min-w-0 flex-1 bg-transparent text-xs text-fg outline-none placeholder:text-fg-muted/70"
+          />
+        </div>
       </div>
       <div className="flex-1 space-y-1 overflow-y-auto px-2.5 pb-2">
         {sessions.length === 0 && (
@@ -4736,90 +5129,102 @@ export function AIChat({
             </p>
           </div>
         )}
-        {sessions.map((s, idx) => {
-          const active = s.id === activeId;
-          const isDragging = dragIdx === idx;
-          const isDragOver =
-            dragOverIdx === idx && dragIdx !== null && dragIdx !== idx;
-          return (
-            <div
-              key={s.id}
-              onClick={() => selectSession(s.id)}
-              draggable={!editingSessionId}
-              onDragStart={(e) => handleSessionDragStart(e, idx)}
-              onDragOver={(e) => handleSessionDragOver(e, idx)}
-              onDrop={(e) => handleSessionDrop(e, idx)}
-              onDragEnd={handleSessionDragEnd}
-              title={
-                active ? "当前会话（可拖动排序）" : "点击切换 · 可拖动排序"
-              }
-              className={`group relative flex cursor-pointer items-center gap-1.5 rounded-xl border py-2 pl-3.5 pr-1.5 text-sm transition active:scale-[0.99] ${active ? "border-gray-300/80 bg-white text-gray-900 dark:border-gray-600/80 dark:bg-gray-800 dark:text-gray-100" : "border-transparent bg-transparent text-gray-600 hover:border-gray-200/80 hover:bg-white/80 dark:text-gray-400 dark:hover:border-gray-700/80 dark:hover:bg-gray-900/80"} ${isDragging ? "opacity-50" : ""} ${isDragOver ? "ring-1 ring-inset ring-gray-900/15 dark:ring-gray-400/30" : ""}`}
-            >
-              {/* 激活态左侧竖条 */}
-              {active && (
-                <span className="absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-gray-900 dark:bg-gray-200" />
-              )}
-              {s.id === editingSessionId ? (
-                <input
-                  autoFocus
-                  value={editTitle}
-                  onChange={(e) => setEditTitle(e.target.value)}
-                  onBlur={commitRename}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") commitRename();
-                    if (e.key === "Escape") setEditingSessionId(null);
-                  }}
-                  onClick={(e) => e.stopPropagation()}
-                  className="min-w-0 flex-1 rounded-md border border-gray-300 bg-white px-1.5 py-0.5 text-xs outline-none dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200"
-                />
-              ) : (
-                <span className="min-w-0 flex-1 truncate">{s.title}</span>
-              )}
-              {s.id !== editingSessionId && (
-                <button
-                  onClick={(e) => startRename(e, s)}
-                  className="hidden shrink-0 rounded-md p-1.5 text-gray-400 transition hover:bg-gray-200/70 hover:text-gray-700 group-hover:flex max-sm:flex dark:hover:bg-gray-600/60 dark:hover:text-gray-200"
-                  title="重命名"
-                  aria-label="重命名"
-                >
-                  <svg
-                    className="h-3.5 w-3.5"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125"
-                    />
-                  </svg>
-                </button>
-              )}
-              <button
-                onClick={(e) => deleteSession(e, s.id)}
-                className="hidden shrink-0 rounded-md p-1.5 text-gray-400 transition hover:bg-red-100 hover:text-red-500 group-hover:flex max-sm:flex dark:hover:bg-red-900/30 dark:hover:text-red-400"
-                title="删除"
-                aria-label="删除"
+        {sessions
+          .map((s, idx) => ({ s, idx }))
+          .filter(
+            ({ s }) =>
+              !wsQuery.trim() ||
+              s.title.toLowerCase().includes(wsQuery.trim().toLowerCase()),
+          )
+          .map(({ s, idx }) => {
+            const active = s.id === activeId;
+            const isDragging = dragIdx === idx;
+            const isDragOver =
+              dragOverIdx === idx && dragIdx !== null && dragIdx !== idx;
+            return (
+              <div
+                key={s.id}
+                onClick={() => selectSession(s.id)}
+                draggable={!editingSessionId}
+                onDragStart={(e) => handleSessionDragStart(e, idx)}
+                onDragOver={(e) => handleSessionDragOver(e, idx)}
+                onDrop={(e) => handleSessionDrop(e, idx)}
+                onDragEnd={handleSessionDragEnd}
+                title={
+                  active ? "当前会话（可拖动排序）" : "点击切换 · 可拖动排序"
+                }
+                className={`group relative flex cursor-pointer items-center gap-1.5 rounded-control border py-2 pl-3.5 pr-1.5 text-sm transition active:scale-[0.99] ${active ? "border-line bg-sunken text-fg" : "border-transparent text-fg-muted hover:bg-sunken hover:text-fg"} ${isDragging ? "opacity-50" : ""} ${isDragOver ? "ring-1 ring-inset ring-accent/30" : ""}`}
               >
-                <svg
-                  className="h-3.5 w-3.5"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M6 18L18 6M6 6l12 12"
+                {/* 激活态左侧竖条 */}
+                {active && (
+                  <span className="absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-accent" />
+                )}
+                {s.id === editingSessionId ? (
+                  <input
+                    autoFocus
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    onBlur={commitRename}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") commitRename();
+                      if (e.key === "Escape") setEditingSessionId(null);
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    className="min-w-0 flex-1 rounded-md border border-gray-300 bg-white px-1.5 py-0.5 text-xs outline-none dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200"
                   />
-                </svg>
-              </button>
-            </div>
-          );
-        })}
+                ) : (
+                  <span className="min-w-0 flex-1 truncate pr-12">
+                    {s.title}
+                  </span>
+                )}
+                {/* 行尾操作：绝对定位覆盖在行右侧，悬停出现不挤压标题/不改变行尺寸 */}
+                <span className="absolute right-1 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded-md bg-gradient-to-l from-sunken via-sunken to-transparent pl-4 group-hover:flex max-sm:flex">
+                  {s.id !== editingSessionId && (
+                    <button
+                      onClick={(e) => startRename(e, s)}
+                      className="shrink-0 rounded-md p-1.5 text-gray-400 transition hover:bg-gray-200/70 hover:text-gray-700 dark:hover:bg-gray-600/60 dark:hover:text-gray-200"
+                      title="重命名"
+                      aria-label="重命名"
+                    >
+                      <svg
+                        className="h-3.5 w-3.5"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125"
+                        />
+                      </svg>
+                    </button>
+                  )}
+                  <button
+                    onClick={(e) => deleteSession(e, s.id)}
+                    className="shrink-0 rounded-md p-1.5 text-gray-400 transition hover:bg-red-100 hover:text-red-500 dark:hover:bg-red-900/30 dark:hover:text-red-400"
+                    title="删除"
+                    aria-label="删除"
+                  >
+                    <svg
+                      className="h-3.5 w-3.5"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M6 18L18 6M6 6l12 12"
+                      />
+                    </svg>
+                  </button>
+                </span>
+              </div>
+            );
+          })}
       </div>
       {/* 底部：内嵌圆角卡片（额度 + 主题 + 站点名） */}
       <div className="shrink-0 p-2.5">
@@ -4842,6 +5247,49 @@ export function AIChat({
               </div>
             </div>
           )}
+          {/* 更多（设置）：侧边栏底部卡片 */}
+          <button
+            onClick={() => goNav("settings")}
+            className={
+              "mt-2 flex w-full cursor-pointer items-center gap-2 rounded-control border px-2 py-1.5 text-left transition " +
+              (mainView === "settings"
+                ? "border-accent/40 bg-accent/10"
+                : "border-line bg-surface hover:bg-sunken")
+            }
+          >
+            <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-sunken text-fg-muted">
+              <svg
+                className="h-4 w-4"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.7"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z" />
+              </svg>
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-xs font-medium text-fg">
+                更多
+              </span>
+              <span className="block truncate text-[10px] text-fg-muted">
+                设置 · 数据 · 关于
+              </span>
+            </span>
+            <svg
+              className="h-3.5 w-3.5 shrink-0 text-fg-muted"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+            >
+              <path d="M9 5l7 7-7 7" />
+            </svg>
+          </button>
           {/* 主题切换：Auto / 亮 / 暗 三态（默认 Auto 跟随系统） */}
           <div className="mt-2 flex items-center rounded-lg bg-gray-100 p-0.5 dark:bg-gray-800">
             <button
@@ -4909,7 +5357,7 @@ export function AIChat({
           {/* 站点标识：默认使用当前 AI 机器人的名称与头像（在 AI Chat 页面以 AI 作为站点） */}
           <div className="mt-2 flex items-center gap-1.5 px-1">
             <BotAvatar
-              src={config.avatar}
+              src={avatar}
               name={config.botName || "AI"}
               className="h-5 w-5"
             />
@@ -4945,13 +5393,13 @@ export function AIChat({
       }`}
     >
       <div
-        className={`absolute inset-0 bg-black/40 backdrop-blur-sm transition-opacity duration-300 ${
+        className={`absolute inset-0 bg-black/30 transition-opacity duration-300 ${
           sidebarOpen ? "opacity-100" : "opacity-0"
         }`}
         onClick={() => setSidebarOpen(false)}
       />
       <div
-        className={`absolute inset-y-0 left-0 w-64 shadow-2xl transition-transform duration-300 ease-in-out ${
+        className={`absolute inset-y-0 left-0 w-64 border-r border-line transition-transform duration-300 ease-in-out ${
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >
@@ -4994,6 +5442,12 @@ export function AIChat({
                 live2dOn={l2dEnabled}
                 onTabChange={setAgentTab}
                 allowWebAutoDetect={browseAgentOn}
+                artifacts={artifacts}
+                activeArtifactId={activeArtifactId}
+                onSelectArtifact={setActiveArtifactId}
+                onDeleteArtifact={deleteArtifact}
+                onBrowseArtifact={onBrowseArtifact}
+                onAsk={askAgent}
               />
             </div>
           )}
@@ -5002,10 +5456,7 @@ export function AIChat({
       {/* 移动端：底部滑入，无模糊遮罩 */}
       {agentOpen && (
         <div className="fixed inset-0 z-50 lg:hidden pointer-events-none">
-          <div
-            className="absolute inset-x-0 bottom-0 pointer-events-auto animate-[kslideUp_0.35s_ease-out] bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-800 shadow-2xl"
-            style={{ top: "52px", maxHeight: "calc(100vh - 52px)" }}
-          >
+          <div className="absolute inset-x-0 bottom-0 top-[calc(env(safe-area-inset-top)+52px)] pointer-events-auto animate-[kslideUp_0.35s_ease-out] overflow-hidden border-t border-line bg-surface">
             <MemoAgentPanel
               onClose={closeAgentPanel}
               initUrl={agentInitUrl}
@@ -5021,6 +5472,12 @@ export function AIChat({
               live2dOn={l2dEnabled}
               onTabChange={setAgentTab}
               allowWebAutoDetect={browseAgentOn}
+              artifacts={artifacts}
+              activeArtifactId={activeArtifactId}
+              onSelectArtifact={setActiveArtifactId}
+              onDeleteArtifact={deleteArtifact}
+              onBrowseArtifact={onBrowseArtifact}
+              onAsk={askAgent}
             />
           </div>
         </div>
@@ -5037,27 +5494,68 @@ export function AIChat({
         (live2dImmersive ? "" : "bg-white dark:bg-gray-900")
       }
     >
-      {/* 手机沉浸：铺满的多重水印暗纹网格（浮在 Live2D 之上、聊天内容之下），恢复“暗纹”显示 */}
-      {live2dImmersive && (
-        <div className="pointer-events-none fixed inset-0 z-0 select-none overflow-hidden">
-          <div className="grid h-full grid-cols-2 content-center gap-x-14 gap-y-20 px-4 opacity-20 sm:grid-cols-3">
-            {Array.from({ length: 12 }).map((_, i) => (
-              <span
-                key={i}
-                className="rotate-[-16deg] whitespace-nowrap text-[10px] font-medium tracking-[0.2em] text-gray-400/60 dark:text-gray-500/40"
-              >
-                AI 生成 · {effCfg.model || "AI"} ·{" "}
-                {hasCustom ? "自定义" : "站点"}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
       {desktopSidebar}
       <div className="relative z-10 flex min-h-0 min-w-0 flex-1 flex-col">
         {chatBody}
+        {/* 全屏子页：知识库 / 插件 / 设置（从顶栏下方开始，不遮侧边栏与顶栏） */}
+        {mainView !== "chat" && (
+          <div
+            className="absolute inset-x-0 bottom-0 z-30 overflow-hidden bg-surface"
+            style={{ top: headerH }}
+          >
+            {mainView === "plugins" ? (
+              <PluginsPage
+                onAsk={(t) => {
+                  setMainView("chat");
+                  window.setTimeout(() => void sendRef.current(t), 50);
+                }}
+              />
+            ) : mainView === "study" ? (
+              <StudyPage onGenerate={generateStudy} />
+            ) : (
+              <div className="flex h-full min-h-0 flex-col bg-surface">
+                {/* 页面标题（全屏页保留顶栏与侧边栏） */}
+                <div className="shrink-0 border-b border-line px-6 py-4">
+                  <h1 className="text-xl font-semibold text-fg">
+                    {mainView === "kb" ? "知识库" : "设置"}
+                  </h1>
+                  <p className="mt-1 text-xs text-fg-muted">
+                    {mainView === "kb"
+                      ? "页面树 · 全文搜索 · Notion 双向同步"
+                      : "模型 API · 搜索数据源 · 外观与数据同步"}
+                  </p>
+                </div>
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  <MemoAgentPanel
+                    fullscreen
+                    onClose={() => setMainView("chat")}
+                    initUrl={agentInitUrl}
+                    initTab={mainView}
+                    searchNonce={agentSearchNonce}
+                    initEditContent={agentEditContent}
+                    lastAssistantContent={settledAssistant}
+                    pageId={pageId}
+                    onKbChanged={refreshKb}
+                    settings={settingsData}
+                    kbOpen={agentKbOpen}
+                    onKbOpenConsumed={consumeKbOpen}
+                    live2dOn={l2dEnabled}
+                    onTabChange={setAgentTab}
+                    allowWebAutoDetect={browseAgentOn}
+                    artifacts={artifacts}
+                    activeArtifactId={activeArtifactId}
+                    onSelectArtifact={setActiveArtifactId}
+                    onDeleteArtifact={deleteArtifact}
+                    onBrowseArtifact={onBrowseArtifact}
+                    onAsk={askAgent}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
-      {agentSidebar}
+      {mainView === "chat" && agentSidebar}
       {mobileSidebar}
     </div>
   );

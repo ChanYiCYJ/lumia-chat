@@ -12,7 +12,7 @@
 import {
   loadKbEntries,
   saveKbEntry,
-  saveKbNotes,
+  writeKbEntries,
   uid,
   reparentKbEntry,
   isKbDescendant,
@@ -83,21 +83,9 @@ export function isKbNotionImported(entries: KbEntryRecord[]): boolean {
   return entries.length > 0 && entries.every((e) => !!e.notionId);
 }
 
-// ---- entries 写回（同步 notes，与 kb.ts saveKbEntry 同构） ----
+// ---- entries 写回（统一走 kb.ts writeKbEntries） ----
 function writeEntries(entries: KbEntryRecord[]): void {
-  try {
-    localStorage.setItem("kimo_kb_entries", JSON.stringify(entries));
-  } catch {
-    /* 忽略 */
-  }
-  saveKbNotes(
-    entries.map((e) => ({
-      id: e.id,
-      title: e.name,
-      content: e.content,
-      createdAt: e.createdAt,
-    })),
-  );
+  writeKbEntries(entries);
 }
 
 /** 通知 UI（AgentPanel 等）条目已变更（后台回填 notionId 后刷新网格） */

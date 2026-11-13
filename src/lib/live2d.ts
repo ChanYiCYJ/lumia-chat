@@ -570,7 +570,13 @@ export const EMOTION_MOTIONS: Record<Emotion, string[]> = {
   ],
   sad: ["sad01", "sad02", "sad03", "cry01", "cry02", "cry03"],
   angry: ["angry01", "angry02", "serious01"],
-  surprised: ["surprised01", "surprised02", "surprised03", "scared01", "surprised04"],
+  surprised: [
+    "surprised01",
+    "surprised02",
+    "surprised03",
+    "scared01",
+    "surprised04",
+  ],
   shy: ["shame01", "shame02", "niyaniya01"],
   thinking: ["serious01", "serious02", "eeto01", "nod01", "nod02", "look01"],
   sleepy: ["sleep01", "sleep02", "sleep03"],
@@ -1199,6 +1205,8 @@ export interface Live2dActionCommands {
   params: Live2dParamCmd[];
   motion?: string;
   expression?: string;
+  /** 情绪（[EMOTION:开心]）→ 走统一情绪预设 + 动作 */
+  emotion?: Emotion;
   /** 头部视线方向（[LOOK:left] 等，驱动 ParamAngleX/Y 短时） */
   look?: LookDirection;
 }
@@ -1216,7 +1224,7 @@ export const LOOK_TARGETS: Record<LookDirection, { x: number; y: number }> = {
 };
 
 const ACTION_TAG_NAMES =
-  "(?:PARAM|参数|MOTION|动作|EXPRESSION|表情预设|LOOK|看|视线)";
+  "(?:PARAM|参数|MOTION|动作|EXPRESSION|表情预设|EMOTION|情绪|心情|LOOK|看|视线)";
 
 /** 单条指令正则（[PARAM:ParamEyeLOpen:0.8] 等；值可带小数/负号/空格） */
 const ACTION_CMD_RE = new RegExp(
@@ -1233,6 +1241,7 @@ export function parseActionCommands(text: string): Live2dActionCommands {
   const params = new Map<string, number>();
   let motion: string | undefined;
   let expression: string | undefined;
+  let emotion: Emotion | undefined;
   let look: LookDirection | undefined;
   const t = text || "";
   ACTION_CMD_RE.lastIndex = 0;
@@ -1252,6 +1261,15 @@ export function parseActionCommands(text: string): Live2dActionCommands {
       if (body) motion = body;
     } else if (kind === "EXPRESSION" || kind === "表情预设") {
       if (body) expression = body;
+    } else if (kind === "EMOTION" || kind === "情绪" || kind === "心情") {
+      // 支持英文 key（happy）或中文标签（开心）
+      const raw = body.toLowerCase().replace(/[\s，,。、]/g, "");
+      for (const [key, preset] of Object.entries(EMOTION_PRESETS)) {
+        if (raw === key || raw === preset.label) {
+          emotion = key as Emotion;
+          break;
+        }
+      }
     } else if (kind === "LOOK" || kind === "看" || kind === "视线") {
       const dir = body.toLowerCase().replace(/[\s，,。、]/g, "");
       // 中文方向词归一化（左/右/上/下/中间 → left/right/up/down/center）
@@ -1278,6 +1296,7 @@ export function parseActionCommands(text: string): Live2dActionCommands {
     params: [...params.entries()].map(([id, value]) => ({ id, value })),
     motion,
     expression,
+    emotion,
     look,
   };
 }
@@ -1286,7 +1305,7 @@ export function parseActionCommands(text: string): Live2dActionCommands {
 export function stripActionCommands(text: string): string {
   return (text || "")
     .replace(
-      /[\[【]\s*(?:PARAM|参数|MOTION|动作|EXPRESSION|表情预设|LOOK|看|视线)\s*[:：]\s*[^\]】\n]{1,60}?[\]】]/gi,
+      /[\[【]\s*(?:PARAM|参数|MOTION|动作|EXPRESSION|表情预设|EMOTION|情绪|心情|LOOK|看|视线)\s*[:：]\s*[^\]】\n]{1,60}?[\]】]/gi,
       "",
     )
     .trim();

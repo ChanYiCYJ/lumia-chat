@@ -20,6 +20,9 @@
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
+/** 后端 TTS 故障短期熔断（避免每次朗读都白等超时；5 分钟后自动重试） */
+let backendTtsDownUntil = 0;
+
 /** 带超时的 fetch（第三方 API 统一限时，避免单个上游拖慢整体请求） */
 async function fetchT(url, opts = {}, ms = 6000) {
   const ctrl = new AbortController();
@@ -1655,7 +1658,10 @@ export default {
           },
         });
       } catch (e) {
-        return jsonRes({ error: { message: String((e && e.message) || e) } }, 502);
+        return jsonRes(
+          { error: { message: String((e && e.message) || e) } },
+          502,
+        );
       }
     }
 
@@ -1723,6 +1729,85 @@ export default {
             },
           },
         );
+      }
+    }
+
+    // ── 2.6) TTS 代理：/api/tts?text=&voice= ────────────────────────────────
+    // 前端朗读需要「同源 + 带 CORS」的音频（Web Audio 读波形驱动 Live2D 口型），
+    // 而免费第三方 TTS 都不带 CORS 头 → 统一由本 Worker 转发。
+    // 音源优先级：自有后端 edge-tts（音色最好）→ 有道 dictvoice → Google translate_tts，
+    // 后两者免 key；任一路失败自动降级，保证「有声音」。
+    if (pathname === "/api/tts") {
+      if (request.method === "OPTIONS") return corsPreflight("Content-Type");
+      const text = (url.searchParams.get("text") || "").trim().slice(0, 2000);
+      const voice = url.searchParams.get("voice") || "zh-CN-XiaoxiaoNeural";
+      if (!text) return jsonRes({ error: "Missing text" }, 400);
+      const isZh = /[\u4e00-\u9fff]/.test(text);
+
+      const audioRes = (buf, from) =>
+        new Response(buf, {
+          status: 200,
+          headers: {
+            "Content-Type": "audio/mpeg",
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=86400",
+            "X-TTS-Source": from,
+          },
+        });
+
+      // 1) 自有后端 edge-tts（未配置 API_BACKEND / 故障熔断中 → 自动跳过）
+      if (backend && Date.now() > backendTtsDownUntil) {
+        try {
+          const r = await fetchT(
+            backend +
+              "/api/v1/tts?text=" +
+              encodeURIComponent(text) +
+              "&voice=" +
+              encodeURIComponent(voice),
+            { headers: { Accept: "audio/mpeg" } },
+            8000,
+          );
+          if (r.ok) {
+            const b = await r.arrayBuffer();
+            if (b.byteLength > 512) return audioRes(b, "backend");
+          }
+          backendTtsDownUntil = Date.now() + 5 * 60 * 1000;
+        } catch {
+          backendTtsDownUntil = Date.now() + 5 * 60 * 1000;
+        }
+      }
+
+      // 2) 免费音源并发竞速（有道 dictvoice / Google translate_tts，均免 key）
+      //    任一路先成功即返回，避免串行等待把首次合成拖到 5s+
+      const tryFetchAudio = async (u, from) => {
+        const r = await fetchT(
+          u,
+          { headers: { Accept: "audio/mpeg", "User-Agent": UA } },
+          8000,
+        );
+        if (!r.ok) throw new Error(from + " http " + r.status);
+        const b = await r.arrayBuffer();
+        if (b.byteLength <= 512) throw new Error(from + " empty");
+        return { b, from };
+      };
+      const youdaoUrl =
+        "https://dict.youdao.com/dictvoice?audio=" +
+        encodeURIComponent(text.slice(0, 500)) +
+        "&le=" +
+        (isZh ? "zh" : "en");
+      const googleUrl =
+        "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=" +
+        (isZh ? "zh-CN" : "en") +
+        "&q=" +
+        encodeURIComponent(text.slice(0, 200));
+      try {
+        const first = await Promise.any([
+          tryFetchAudio(youdaoUrl, "youdao"),
+          tryFetchAudio(googleUrl, "google"),
+        ]);
+        return audioRes(first.b, first.from);
+      } catch {
+        return jsonRes({ error: "TTS 暂不可用（后端与备用音源均失败）" }, 502);
       }
     }
 

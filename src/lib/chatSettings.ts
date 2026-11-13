@@ -32,6 +32,7 @@ const KEY_MEMORY_PREFIX = "kimo_chat_memory_";
 const KEY_CUSTOM_MODEL = "kimo_ai_custom_model";
 const KEY_AUTO_KNOWLEDGE = "kimo_ai_autoknow";
 const KEY_PERSONA_KNOWLEDGE_PREFIX = "kimo_ai_persona_";
+const KEY_AGENT_NATIVE = "kimo_ai_agent_native_tools";
 
 // ---- localStorage 安全封装 ----
 export function lsGet(key: string): string | null {
@@ -142,7 +143,7 @@ export function saveTtsPref(on: boolean): void {
 }
 
 // ---- 音频 TTS：朗读时用「可返回音频的 TTS 地址」真实音频波形驱动口型（speakAudio）。
-//      内置后端（/api/v1/tts，edge-tts 免费）无需填地址；第三方地址模板支持 {text} 占位符。----
+//      内置音源（同源 Worker /api/tts，多路降级）无需填地址；第三方地址模板支持 {text} 占位符。----
 const KEY_TTS_AUDIO_URL = "kimo_ai_tts_audio_url";
 export function loadTtsAudioUrl(): string {
   return (lsGet(KEY_TTS_AUDIO_URL) || "").trim();
@@ -238,8 +239,12 @@ export function applyTtsVoice(url: string, voice: string): string {
 // ---- TTS 来源（音频 TTS 模式的音频来源）----
 export type TtsSource = "backend" | "thirdparty";
 const KEY_TTS_SOURCE = "kimo_ai_tts_source";
-/** 内置后端 TTS 模板（走 Cloudflare Worker /api 同源反代 → FastAPI /api/v1/tts，edge-tts 免费） */
-export const BACKEND_TTS_TEMPLATE = "/api/v1/tts?text={text}";
+/**
+ * 内置 TTS 模板（同源 Worker 代理 /api/tts）：
+ * Worker 内按「自有后端 edge-tts → 有道 dictvoice → Google translate_tts」自动降级，
+ * 均免 key；返回带 CORS 的 audio/mpeg，供 Web Audio 分析波形驱动 Live2D 口型。
+ */
+export const BACKEND_TTS_TEMPLATE = "/api/tts?text={text}";
 export function loadTtsSource(): TtsSource {
   return lsGet(KEY_TTS_SOURCE) === "thirdparty" ? "thirdparty" : "backend";
 }
@@ -249,7 +254,7 @@ export function saveTtsSource(source: TtsSource): void {
 
 /**
  * 根据来源解析最终 TTS 音频 URL（纯函数，可单测）：
- * - backend：内置后端 /api/v1/tts?text={text}（无需用户填地址）
+ * - backend：内置音源 /api/tts?text={text}（无需用户填地址）
  * - thirdparty：用户填的第三方地址模板
  * 两者都追加所选音色 voice；文本为空或模板缺失返回 null。
  */
@@ -377,4 +382,23 @@ export function mergeEffCfg(
     systemPrompt:
       localCfg.prompt || selected?.systemPrompt || config.systemPrompt,
   };
+}
+
+// ---- 原生工具调用（pi-agent-core Agent 模式）----
+// 默认开启；用户可在设置里关闭，模型不支持 tools 时会自动回退旧的 [TAG:] 通道
+export function loadAgentNativeTools(): boolean {
+  return lsGet(KEY_AGENT_NATIVE) !== "0";
+}
+export function saveAgentNativeTools(on: boolean): void {
+  lsSet(KEY_AGENT_NATIVE, on ? "1" : "0");
+}
+
+// ---- 搜索数据源专用 Key（与模型 API Key 分离）----
+// 留空则复用模型 API 的 Key（旧行为）；填写后联网搜索只用这把 Key
+const KEY_SEARCH_API = "kimo_search_api_key";
+export function loadSearchApiKey(): string {
+  return lsGet(KEY_SEARCH_API) || "";
+}
+export function saveSearchApiKey(key: string): void {
+  lsSet(KEY_SEARCH_API, key.trim());
 }

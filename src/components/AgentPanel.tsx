@@ -2,25 +2,23 @@ import {
   useState,
   useEffect,
   useRef,
-  memo,
   lazy,
   Suspense,
   Component,
   type ReactNode,
 } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { TypeWriter } from "./Spinner";
 import { fetchWebpage, searchWithCache } from "../lib/search";
 import { loadSearchSpeed, loadSearchDepth } from "../lib/chatSettings";
 import { useToast } from "../lib/toast";
 import { SettingsTab, type AgentSettingsProps } from "./SettingsTab";
 import { Live2DStage } from "./Live2DStage";
 import {
-  saveKbNotes,
+  loadKbEntries,
+  writeKbEntries,
   downloadText,
   deriveEntryTitle,
   reorderKbEntries,
+  type KbEntryRecord,
 } from "../lib/kb";
 import {
   loadKbStoreMode,
@@ -39,8 +37,13 @@ import {
 } from "../lib/kbStore";
 import { hasNotionCfg } from "../lib/notion";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { KbInsightPanel } from "./KbInsightPanel";
 import { NotionIcon } from "./ui";
 import { KbPageTree } from "./KbPageTree";
+import { ArtifactList } from "./ArtifactList";
+import { ArtifactDetail } from "./ArtifactDetail";
+import type { Artifact } from "../lib/artifacts";
+import type { BrowseArtifactInput } from "../lib/artifacts";
 
 // Notion 式块编辑器（懒加载：仅打开 KB 编辑 tab 时才拉取 BlockNote chunk，控制首屏体积）
 const KbBlockEditor = lazy(() =>
@@ -79,99 +82,49 @@ class KbEditorBoundary extends Component<
 }
 
 // ===== Types =====
-interface KbEntry {
-  id: string;
-  name: string;
-  content: string;
-  createdAt: number;
-  /** 已同步到的 Notion 页面 id（双向删除/更新使用） */
-  notionId?: string;
-  /** 最近一次成功同步到 Notion 的时间戳 */
-  notionSyncedAt?: number;
-  /** Content access 根页面 id（1 根=整个知识库，≥2 根=按根分类） */
-  notionRootId?: string;
-  /** Content access 根页面标题（分类组名） */
-  notionRootName?: string;
-  /** 父页面 id（子页面有值；用于子页面树嵌套） */
-  notionParentId?: string;
-  /** 父页面标题 */
-  notionParentName?: string;
-  /** 本地父条目 id（未同步页面的父子关系） */
-  parentId?: string;
-  /** 本地排序序号（页面树同级重排用） */
-  order?: number;
-  /** 手动重命名后锁定标题（正文 H1 变化不再覆盖 name） */
-  titleLocked?: boolean;
+/** 知识条目类型统一取自 lib/kb（避免本地重复定义） */
+type KbEntry = KbEntryRecord;
+
+/** 网页产物的展示标题：正文首行有效文本，失败回落到域名 */
+function deriveWebTitle(text: string, url: string): string {
+  const first = text
+    .split("\n")
+    .map((s) => s.trim())
+    .find(
+      (s) =>
+        s.length >= 2 &&
+        s.length <= 80 &&
+        !/^https?:\/\//i.test(s) &&
+        !/^[#>*\-\s]+$/.test(s),
+    );
+  if (first) return first.slice(0, 80);
+  try {
+    return new URL(url).hostname.replace(/^www\./i, "");
+  } catch {
+    return url;
+  }
 }
 
-const KB_KEY = "kimo_kb_entries";
-
-/** 文章 Markdown 渲染（memo 化）：articleMd 大文本未变化时跳过 ReactMarkdown+GFM 重复解析 */
-const PanelMarkdown = memo(function PanelMarkdown({
-  content,
-}: {
-  content: string;
-}) {
-  return (
-    <div className="markdown-body kimo-panel">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
-    </div>
-  );
-});
 /** Agent 面板 tab 记忆（刷新后恢复上次所在 tab，如停留在 Live2D 刷新不会跳回知识库） */
 const AGENT_TAB_KEY = (pageId: number) => `kimo_ai_agent_tab_${pageId}`;
-const AGENT_TABS = ["web", "kb", "edit", "settings", "live2d"] as const;
+/** View 已合并进「产物」：web 仅作为历史持久值/入参保留，统一映射到 artifacts */
+const AGENT_TABS = ["artifacts", "kb", "edit", "settings", "live2d"] as const;
 type AgentTab = (typeof AGENT_TABS)[number];
+function normalizeTab(t?: string | null): AgentTab | null {
+  if (t === "web") return "artifacts";
+  return t && (AGENT_TABS as readonly string[]).includes(t)
+    ? (t as AgentTab)
+    : null;
+}
 function loadAgentTab(pageId: number): AgentTab | null {
   try {
-    const s = localStorage.getItem(AGENT_TAB_KEY(pageId));
-    if (s && (AGENT_TABS as readonly string[]).includes(s))
-      return s as AgentTab;
+    return normalizeTab(localStorage.getItem(AGENT_TAB_KEY(pageId)));
   } catch {}
   return null;
 }
 function saveAgentTab(pageId: number, tab: AgentTab): void {
   try {
     localStorage.setItem(AGENT_TAB_KEY(pageId), tab);
-  } catch {}
-}
-
-function loadEntries(): KbEntry[] {
-  try {
-    const r = localStorage.getItem(KB_KEY);
-    if (r) return JSON.parse(r);
-  } catch {}
-  try {
-    const prompts = JSON.parse(
-      localStorage.getItem("kimo_agent_prompts") || "[]",
-    );
-    const notes = JSON.parse(localStorage.getItem("kimo_kb_notes") || "[]");
-    const merged: KbEntry[] = [
-      ...prompts.map((p: Record<string, unknown>) => ({
-        id: "p_" + p.createdAt,
-        name: (p.name as string) || "",
-        content: p.content as string,
-        createdAt: p.createdAt as number,
-      })),
-      ...notes.map((n: Record<string, unknown>) => ({
-        id: n.id as string,
-        name: (n.title as string) || "",
-        content: n.content as string,
-        createdAt: n.createdAt as number,
-      })),
-    ];
-    if (merged.length) {
-      localStorage.setItem(KB_KEY, JSON.stringify(merged));
-      localStorage.removeItem("kimo_agent_prompts");
-    }
-    return merged;
-  } catch {
-    return [];
-  }
-}
-function persist(e: KbEntry[]) {
-  try {
-    localStorage.setItem(KB_KEY, JSON.stringify(e));
   } catch {}
 }
 
@@ -189,10 +142,18 @@ export function AgentPanel({
   live2dOn,
   onTabChange,
   allowWebAutoDetect,
+  artifacts,
+  activeArtifactId,
+  onSelectArtifact,
+  onDeleteArtifact,
+  onBrowseArtifact,
+  onAsk,
+  fullscreen,
 }: {
   onClose: () => void;
   initUrl?: string;
-  initTab?: "web" | "kb" | "edit" | "settings" | "live2d";
+  /** 兼容旧入参：web 已合并进 artifacts */
+  initTab?: "artifacts" | "web" | "kb" | "edit" | "settings" | "live2d";
   initEditContent?: string;
   lastAssistantContent?: string;
   pageId: number;
@@ -211,10 +172,23 @@ export function AgentPanel({
   onTabChange?: (t: AgentTab) => void;
   /** 浏览 tab 自动检测（AI 回复含 URL 时自动切到 View）——仅 Deep 模式开启；auto/fast 不自动跳转 View */
   allowWebAutoDetect?: boolean;
+  /** 本会话产物（由 AIChat 统一持有） */
+  artifacts?: Artifact[];
+  activeArtifactId?: string;
+  onSelectArtifact?: (id: string) => void;
+  onDeleteArtifact?: (id: string) => void;
+  /** 浏览完成（文章生成 / 网页抓取）→ 交给 AIChat 落库为产物并选中 */
+  onBrowseArtifact?: (input: BrowseArtifactInput) => void;
+  /** 产物详情里的「让 AI 续优化」→ 发回聊天 */
+  onAsk?: (text: string) => void;
+  /** 全屏：占满主区域（知识库/设置作为独立页面时），隐藏页签栏与外边距 */
+  fullscreen?: boolean;
 }) {
   // tab 记忆：优先 AI 工具调用指定的 tab；否则恢复上次所在 tab（刷新不丢，如停留 Live2D）；否则默认知识库
   const [tab, setTab] = useState<AgentTab>(
-    () => initTab || (initUrl ? "web" : loadAgentTab(pageId) || "live2d"),
+    () =>
+      normalizeTab(initTab) ||
+      (initUrl ? "artifacts" : loadAgentTab(pageId) || "live2d"),
   );
   // 每次切 tab 都持久化 + 通知 AIChat 同步 agentTab（刷新后回到上次所在页，含 Live2D）
   const onTabChangeRef = useRef(onTabChange);
@@ -225,14 +199,16 @@ export function AgentPanel({
   }, [tab, pageId]);
   const [webUrl, setWebUrl] = useState(initUrl || "");
   const [webLoading, setWebLoading] = useState(false);
-  const [webContent, setWebContent] = useState("");
-  /** 浏览失败/超时的提示（区别于空态占位） */
-  const [webError, setWebError] = useState("");
+  // 这些值仅用于浏览流程内部记录（活动卡已移除），保留 setter 以兼容现有逻辑
+  const [, setWebContent] = useState("");
+  const [, setWebError] = useState("");
   /** 记录当前正在执行的浏览关键词，防止陈旧轮询覆盖新浏览 */
   const activeBrowseRef = useRef("");
-  /** AI 综合筛选后生成的 markdown 文章（含图片/分节/来源） */
-  const [articleMd, setArticleMd] = useState("");
+  const [, setArticleMd] = useState("");
   const [articleLoading, setArticleLoading] = useState(false);
+  const [, setArticleSources] = useState<{ title: string; url: string }[]>([]);
+  /** 同一来源重复落库去重（浏览轮询会多次拿回同一篇文章） */
+  const emittedRef = useRef("");
   /** 本次结果是否来自历史缓存 */
   const [, setFromCache] = useState(false);
   const [mdContent, setMdContent] = useState(initEditContent || "");
@@ -240,13 +216,20 @@ export function AgentPanel({
   const { toast } = useToast();
 
   // KB
-  const [entries, setEntries] = useState<KbEntry[]>(loadEntries);
-  /** 知识条目本地搜索 */
+  const [entries, setEntries] = useState<KbEntry[]>(loadKbEntries);
+  /** 页面树本地搜索词（头部就地输入；关闭即清空） */
   const [entrySearch, setEntrySearch] = useState("");
-  /** 底部操作胶囊面板（展开 新建/搜索/导入/多选操作） */
-  const [kbPanelOpen, setKbPanelOpen] = useState(false);
-  /** 多选搜索输入框（默认收起） */
-  const [multiSearchOpen, setMultiSearchOpen] = useState(false);
+  /** 头部搜索框展开态 */
+  const [searchOpen, setSearchOpen] = useState(false);
+  /** 产物：列表 / 详情切换（窄面板下比上下堆叠更好用） */
+  const [artifactOpen, setArtifactOpen] = useState(false);
+  /** 外部（聊天里的「在 Agent 中打开」）指定产物时，直接进入详情 */
+  useEffect(() => {
+    if (activeArtifactId) setArtifactOpen(true);
+  }, [activeArtifactId]);
+  /** 头部 ⋯ 菜单（迁移到 Notion / 撤销 / 导入导出） */
+  const [kbMenuOpen, setKbMenuOpen] = useState(false);
+  const kbMenuRef = useRef<HTMLDivElement>(null);
   /** 数据操作保护：友好确认弹窗状态（替代 window.confirm） */
   const [confirm, setConfirm] = useState<{
     title: string;
@@ -320,9 +303,6 @@ export function AgentPanel({
     });
   };
 
-  const [showExportMenu, setShowExportMenu] = useState(false);
-  const exportRef = useRef<HTMLDivElement>(null);
-
   // Auto-detect（仅在面板已挂载后、lastAssistantContent 变化时触发；跳过首挂载，避免刷新恢复时覆盖用户所在 tab，如 Live2D 刷新后跳到编辑器）
   // 只对「AI 给了网页链接」自动切到浏览页；代码块不再自动切编辑器——编辑器只由明确的 [EDIT:] 指令打开（AIChat 通过 initEditContent/initTab 控制），避免 AI 普通回复带代码块就把用户从 Live2D 等 tab 切走
   const autoDetectFirst = useRef(true);
@@ -336,13 +316,14 @@ export function AgentPanel({
     const u = lastAssistantContent.match(/https?:\/\/[^\s<>"{}|\\^`\[\]]+/);
     if (u) {
       setWebUrl(u[0]);
-      setTab("web");
+      setTab("artifacts");
     }
   }, [lastAssistantContent, allowWebAutoDetect]);
 
   // 响应 AI 工具调用：切换 tab / 填入编辑内容（面板已挂载时也生效）
   useEffect(() => {
-    if (initTab) setTab(initTab);
+    const t = normalizeTab(initTab);
+    if (t) setTab(t);
     if (initEditContent != null) {
       setMdContent(initEditContent);
       setActiveEntry(null);
@@ -352,7 +333,7 @@ export function AgentPanel({
   // AI 创建/编辑知识库：AIChat 已通过 kb.ts 写入存储，这里仅展示到编辑器并刷新列表
   useEffect(() => {
     if (!kbOpen) return;
-    setEntries(loadEntries());
+    setEntries(loadKbEntries());
     const { entry } = kbOpen;
     if (entry && (entry.name.trim() || entry.content.trim())) {
       setActiveEntry({
@@ -371,7 +352,7 @@ export function AgentPanel({
   useEffect(() => subscribeKbSync(setSyncStatus), []);
   useEffect(() => {
     const onEntriesChanged = () => {
-      const list = loadEntries();
+      const list = loadKbEntries();
       setEntries(list);
       // 同步回填的 notionId/meta 到当前编辑条目（避免后续同步快照仍是「无 notionId」旧状态）
       setActiveEntry((cur) => {
@@ -390,7 +371,7 @@ export function AgentPanel({
     if (tab !== "kb" || !hasNotionCfg()) return;
     const t = setTimeout(() => {
       void pullNotionPagesToKb().finally(() => {
-        setEntries(loadEntries());
+        setEntries(loadKbEntries());
       });
       if (!backfillOnce.current) {
         backfillOnce.current = true;
@@ -400,28 +381,16 @@ export function AgentPanel({
     return () => clearTimeout(t);
   }, [tab]);
 
-  // Sync entries
+  // 关闭头部 ⋯ 菜单（点击外部）
   useEffect(() => {
-    saveKbNotes(
-      entries.map((e) => ({
-        id: e.id,
-        title: e.name,
-        content: e.content,
-        createdAt: e.createdAt,
-      })),
-    );
-  }, [entries]);
-
-  // Close export menu
-  useEffect(() => {
-    if (!showExportMenu) return;
+    if (!kbMenuOpen) return;
     const h = (e: MouseEvent) => {
-      if (exportRef.current && !exportRef.current.contains(e.target as Node))
-        setShowExportMenu(false);
+      if (kbMenuRef.current && !kbMenuRef.current.contains(e.target as Node))
+        setKbMenuOpen(false);
     };
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
-  }, [showExportMenu]);
+  }, [kbMenuOpen]);
 
   // ---- Drag: document-level ----
   const dc = useRef(0);
@@ -495,15 +464,7 @@ export function AgentPanel({
     };
     setEntries((prev) => {
       const nx = [e, ...prev];
-      persist(nx);
-      saveKbNotes(
-        nx.map((x) => ({
-          id: x.id,
-          title: x.name,
-          content: x.content,
-          createdAt: x.createdAt,
-        })),
-      );
+      writeKbEntries(nx);
       return nx;
     });
     onKbChanged?.();
@@ -538,8 +499,10 @@ export function AgentPanel({
       entry.name.toLowerCase().includes(entrySearch.toLowerCase()) ||
       entry.content.toLowerCase().includes(entrySearch.toLowerCase()),
   );
-  /** 本机未同步条数（已连接时顶部提示 + 迁移入口） */
+  /** 本机未同步条数（已连接时显示在 Notion 胶囊 + 迁移入口） */
   const localUnsyncedCount = entries.filter((e) => !e.notionId).length;
+  /** 已同步到 Notion 的条数（头部胶囊 N/M） */
+  const syncedCount = entries.length - localUnsyncedCount;
   /** 撤销：恢复最近一次写操作前的快照 */
   const handleUndo = () => {
     const restored = restoreKbSnapshot();
@@ -558,7 +521,7 @@ export function AgentPanel({
     setMigrating(true);
     const res = await migrateLocalKbToRoot();
     setMigrating(false);
-    setEntries(loadEntries());
+    setEntries(loadKbEntries());
     if (res.errors.length) {
       toast(
         res.created > 0
@@ -581,15 +544,7 @@ export function AgentPanel({
     setActiveEntry(u);
     setEntries((prev) => {
       const nx = prev.map((e) => (e.id === activeEntry.id ? u : e));
-      persist(nx);
-      saveKbNotes(
-        nx.map((x) => ({
-          id: x.id,
-          title: x.name,
-          content: x.content,
-          createdAt: x.createdAt,
-        })),
-      );
+      writeKbEntries(nx);
       return nx;
     });
     onKbChanged?.();
@@ -611,15 +566,7 @@ export function AgentPanel({
       e.id === id ? { ...e, name: t, titleLocked: true } : e,
     );
     setEntries(nx);
-    persist(nx);
-    saveKbNotes(
-      nx.map((x) => ({
-        id: x.id,
-        title: x.name,
-        content: x.content,
-        createdAt: x.createdAt,
-      })),
-    );
+    writeKbEntries(nx);
     onKbChanged?.();
     const u = nx.find((e) => e.id === id);
     if (u) queueKbSync(u);
@@ -635,15 +582,7 @@ export function AgentPanel({
       };
     });
     setEntries(nx);
-    persist(nx);
-    saveKbNotes(
-      nx.map((x) => ({
-        id: x.id,
-        title: x.name,
-        content: x.content,
-        createdAt: x.createdAt,
-      })),
-    );
+    writeKbEntries(nx);
     onKbChanged?.();
     const u = nx.find((e) => e.id === id);
     if (u) queueKbSync(u);
@@ -662,7 +601,7 @@ export function AgentPanel({
         setConfirm(null);
         void (async () => {
           await deleteKbEntrySmart({ id: entry.id });
-          setEntries(loadEntries());
+          setEntries(loadKbEntries());
           if (activeEntry?.id === entry.id) {
             setActiveEntry(null);
             setMdContent("");
@@ -678,15 +617,7 @@ export function AgentPanel({
   const handleReorder = (parentKey: string, orderedIds: string[]) => {
     const nx = reorderKbEntries(entries, parentKey, orderedIds);
     setEntries(nx);
-    persist(nx);
-    saveKbNotes(
-      nx.map((x) => ({
-        id: x.id,
-        title: x.name,
-        content: x.content,
-        createdAt: x.createdAt,
-      })),
-    );
+    writeKbEntries(nx);
     onKbChanged?.();
   };
   /** 改父移动：本地重排 + 已同步页面在 Notion「重建+删旧」 */
@@ -695,7 +626,7 @@ export function AgentPanel({
     setMovingId(id);
     const res = await moveKbEntry({ id, newParentId: parentId });
     setMovingId(null);
-    setEntries(loadEntries());
+    setEntries(loadKbEntries());
     if (res.error) toast(res.error);
     else toast(res.recreated ? "已移动（Notion 侧已重建页面）" : "已移动");
     onKbChanged?.();
@@ -735,6 +666,13 @@ export function AgentPanel({
     setMdContent("");
     setTab("edit");
   };
+  /** 底部 ＋：新建顶层页面（清空编辑器并进入 edit tab） */
+  const startNewPage = () => {
+    setActiveEntry(null);
+    setMdContent("");
+    setDraftParentId("");
+    setTab("edit");
+  };
 
   // ---- Export/Import ----
   /** 导出全部条目（页面树无多选） */
@@ -745,7 +683,7 @@ export function AgentPanel({
       "kb-" + new Date().toISOString().slice(0, 10) + ".json",
       JSON.stringify({ app: "kimo-kb", version: 1, entries: list }, null, 2),
     );
-    setShowExportMenu(false);
+    setKbMenuOpen(false);
     toast(`已导出 ${list.length} 条（JSON）`);
   };
   const exportMD = () => {
@@ -756,7 +694,7 @@ export function AgentPanel({
         .map((e) => "# " + e.name + "\n\n" + e.content + "\n\n---")
         .join("\n\n"),
     );
-    setShowExportMenu(false);
+    setKbMenuOpen(false);
     toast(`已导出 ${list.length} 条（Markdown）`);
   };
   /** 导入 JSON（支持多文件选择） */
@@ -809,15 +747,7 @@ export function AgentPanel({
         }
         const nx = [...cleaned, ...entries];
         setEntries(nx);
-        persist(nx);
-        saveKbNotes(
-          nx.map((x) => ({
-            id: x.id,
-            title: x.name,
-            content: x.content,
-            createdAt: x.createdAt,
-          })),
-        );
+        writeKbEntries(nx);
         onKbChanged?.();
         toast(`已导入 ${cleaned.length} 条（JSON）`);
       };
@@ -847,15 +777,7 @@ export function AgentPanel({
       };
       const nx = [entry, ...entries];
       setEntries(nx);
-      persist(nx);
-      saveKbNotes(
-        nx.map((x) => ({
-          id: x.id,
-          title: x.name,
-          content: x.content,
-          createdAt: x.createdAt,
-        })),
-      );
+      writeKbEntries(nx);
       onKbChanged?.();
       toast("已导入 Markdown");
     };
@@ -872,7 +794,32 @@ export function AgentPanel({
     setWebError("");
     setWebLoading(true);
     setArticleMd("");
+    setArticleSources([]);
     setArticleLoading(false);
+    emittedRef.current = "";
+    /** 文章就绪 → 落库为产物（同一轮浏览内去重，避免轮询重复写入） */
+    const emitArticle = (
+      topic: string,
+      article: string,
+      srcs: { title?: string; url?: string }[],
+    ) => {
+      const text = (article || "").trim();
+      if (!text) return;
+      const key = `${topic}|${text.length}|${text.slice(0, 40)}`;
+      if (emittedRef.current === key) return;
+      emittedRef.current = key;
+      const sources = (srcs || [])
+        .filter((s) => !!s.url)
+        .slice(0, 8)
+        .map((s) => ({ title: s.title || s.url || "", url: s.url || "" }));
+      onBrowseArtifact?.({
+        kind: "article",
+        title: topic,
+        topic,
+        content: text,
+        sources,
+      });
+    };
     // 关键词搜索（复用缓存；生成中时轮询等待，保证「加载页不提前消失」）
     const runKeyword = async (kw: string, firstForce = false) => {
       setWebUrl(kw);
@@ -901,6 +848,12 @@ export function AgentPanel({
         setWebContent(r.content);
         setArticleMd(r.article || "");
         setArticleLoading(r.loading || false);
+        setArticleSources(
+          (r.sources || [])
+            .filter((s) => !!s.url)
+            .map((s) => ({ title: s.title || s.url, url: s.url })),
+        );
+        if (r.article) emitArticle(kw, r.article, r.sources || []);
       } else if (r.loading) {
         // 仍无内容但还在生成：视为超时，给重试而非误导性的空态
         setWebError("搜索较慢，请稍后点击重试");
@@ -923,6 +876,12 @@ export function AgentPanel({
         if (activeBrowseRef.current !== kw) return;
         setArticleMd(nr.article || "");
         setArticleLoading(false);
+        setArticleSources(
+          (nr.sources || [])
+            .filter((s) => !!s.url)
+            .map((s) => ({ title: s.title || s.url, url: s.url })),
+        );
+        emitArticle(kw, nr.article || "", nr.sources || []);
         setWebError(nr.loading ? "文章生成较慢，可稍后重试" : "");
       }
     };
@@ -949,6 +908,14 @@ export function AgentPanel({
         if (activeBrowseRef.current !== u) return;
         if (text) {
           setWebContent(text);
+          const title = deriveWebTitle(text, u);
+          onBrowseArtifact?.({
+            kind: "web",
+            title,
+            url: u,
+            content: text,
+            sources: [{ title, url: u }],
+          });
         } else {
           // URL 抓取失败（如搜索引擎 CORS 拦截）时回退为关键词搜索
           let q2 = u;
@@ -974,7 +941,16 @@ export function AgentPanel({
         const text = await fetchWebpage(full);
         if (activeBrowseRef.current !== full) return;
         setWebContent(text || "");
-        if (!text) setWebError("无法获取内容，请点击重试");
+        if (text) {
+          const title = deriveWebTitle(text, full);
+          onBrowseArtifact?.({
+            kind: "web",
+            title,
+            url: full,
+            content: text,
+            sources: [{ title, url: full }],
+          });
+        } else setWebError("无法获取内容，请点击重试");
       } else {
         // 关键词搜索：抓取多个结果正文 + AI 综合文章，带历史缓存
         await runKeyword(u, force);
@@ -991,7 +967,7 @@ export function AgentPanel({
   // AI 触发搜索/浏览时自动执行（[SEARCH:] / [BROWSE:] / 卡片点击）
   useEffect(() => {
     if (initUrl) {
-      setTab("web");
+      setTab("artifacts");
       setWebUrl(initUrl);
       setWebContent("");
       browse(initUrl);
@@ -999,28 +975,34 @@ export function AgentPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initUrl, searchNonce]);
 
-  /** 保存 AI 文章到知识库（标题由正文推导，缺省用搜索词）；配置 Notion 时双写到云端 */
-  const saveArticle = () => {
-    if (!articleMd) return;
-    const title = deriveEntryTitle(articleMd, webUrl || "浏览文章");
+  /** 产物保存到知识库（标题由正文推导）；配置 Notion 时双写到云端 */
+  const saveArtifactToKb = (artifact: Artifact) => {
+    if (!artifact.content.trim()) return;
     void saveKbEntrySmart({
-      title,
-      content: articleMd,
+      title: deriveEntryTitle(artifact.content, artifact.title || "产物"),
+      content: artifact.content,
       mode: loadKbStoreMode(),
     }).then((res) => {
       if (res.error) toast(res.error);
     });
     // 刷新本地条目列表，让保存的条目立刻出现在知识库
-    setEntries(loadEntries());
+    setEntries(loadKbEntries());
     toast("已保存到知识库");
   };
 
   return (
     // 学习 Live2D 角色卡片的卡片样式：小外边距 + 大圆角 + 边框，让 Agent 面板整体浮起
-    <div className="relative m-2 flex h-[calc(100%-1rem)] min-w-0 flex-col overflow-hidden rounded-2xl border border-gray-200/70 bg-white dark:border-gray-700/70 dark:bg-gray-900">
+    <div
+      className={
+        "relative flex min-w-0 flex-col overflow-hidden " +
+        (fullscreen
+          ? "h-full w-full bg-surface"
+          : "m-2 h-[calc(100%-1rem)] rounded-card border border-line bg-surface")
+      }
+    >
       {dragOver && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-gray-900/50 backdrop-blur-sm pointer-events-none">
-          <div className="rounded-2xl bg-white p-6 text-center shadow-2xl dark:bg-gray-800">
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 pointer-events-none">
+          <div className="rounded-card border border-line bg-surface p-6 text-center">
             <p className="text-sm font-medium text-gray-700 dark:text-gray-200">
               释放文件到编辑器
             </p>
@@ -1029,18 +1011,22 @@ export function AgentPanel({
         </div>
       )}
 
-      {/* Header：知识库 / 浏览（主 tab，手机仅图标）；设置缩为小图标靠右 */}
-      {/* Header：统一分段 tab（知识库/View/Live2D/设置），紧凑 + 选中 pop 动画；关闭走顶栏 Agent 按钮 */}
-      <div className="flex shrink-0 items-center gap-1 border-b border-gray-100 px-2 py-2 dark:border-gray-800">
-        <div className="flex min-w-0 flex-1 gap-0.5 rounded-lg bg-gray-100 p-0.5 dark:bg-gray-800">
+      {/* Header：统一分段 tab（知识库/产物/Live2D/设置）；View 已合并进「产物」，不再单独占 tab */}
+      <div
+        className={
+          "shrink-0 items-center gap-1 border-b border-gray-100 px-2 py-2 dark:border-gray-800 " +
+          (fullscreen ? "hidden" : "flex")
+        }
+      >
+        <div className="flex min-w-0 flex-1 gap-0.5 whitespace-nowrap rounded-control border border-line bg-sunken p-0.5">
           <button
             onClick={() => setTab("kb")}
             title="知识库"
             className={
-              "flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md px-1.5 py-1.5 text-xs font-medium transition sm:px-2 " +
+              "hidden flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-[8px] px-1.5 py-1.5 text-xs font-medium transition sm:px-2 " +
               (tab === "kb"
-                ? "bg-white text-gray-900 shadow-sm animate-[kpop_0.18s_ease-out] dark:bg-gray-700 dark:text-gray-100"
-                : "text-gray-500 hover:text-gray-700 dark:hover:text-gray-300")
+                ? "bg-surface text-fg shadow-[0_1px_0_rgba(0,0,0,0.04)] animate-[kpop_0.18s_ease-out] dark:shadow-none"
+                : "text-fg-muted hover:text-fg")
             }
           >
             <svg
@@ -1058,14 +1044,15 @@ export function AgentPanel({
             </svg>
             <span className="hidden sm:inline">知识库</span>
           </button>
+          {/* 产物：本会话生成的文章/文档/搜索/网页/知识条/图片/笔记（原 View 已合并到这里） */}
           <button
-            onClick={() => setTab("web")}
-            title="View"
+            onClick={() => setTab("artifacts")}
+            title="产物（文章 / 搜索 / 网页 / 文档 / 知识条 / 图片 / 笔记）"
             className={
-              "flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md px-1.5 py-1.5 text-xs font-medium transition sm:px-2 " +
-              (tab === "web"
-                ? "bg-white text-gray-900 shadow-sm animate-[kpop_0.18s_ease-out] dark:bg-gray-700 dark:text-gray-100"
-                : "text-gray-500 hover:text-gray-700 dark:hover:text-gray-300")
+              "flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-[8px] px-1.5 py-1.5 text-xs font-medium transition sm:px-2 " +
+              (tab === "artifacts"
+                ? "bg-surface text-fg shadow-[0_1px_0_rgba(0,0,0,0.04)] animate-[kpop_0.18s_ease-out] dark:shadow-none"
+                : "text-fg-muted hover:text-fg")
             }
           >
             <svg
@@ -1075,20 +1062,23 @@ export function AgentPanel({
               stroke="currentColor"
               strokeWidth="2"
             >
-              <circle cx="12" cy="12" r="10" />
-              <path d="M2 12h20M12 2a15.3 15.3 0 014 10M12 22a15.3 15.3 0 01-4-10 15.3 15.3 0 014-10" />
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M3.75 6.75A2.25 2.25 0 016 4.5h4.19a2.25 2.25 0 011.59.66l1.06 1.06a2.25 2.25 0 001.59.66H18a2.25 2.25 0 012.25 2.25v7.62A2.25 2.25 0 0118 18.75H6a2.25 2.25 0 01-2.25-2.25V6.75z"
+              />
             </svg>
-            <span className="hidden sm:inline">View</span>
+            <span className="hidden sm:inline">产物</span>
           </button>
           {/* Live2D tab 常显（不因开关隐藏）；未开启时由 Live2DStage 显示空态提示 */}
           <button
             onClick={() => setTab("live2d")}
             title="Live2D"
             className={
-              "flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md px-1.5 py-1.5 text-xs font-medium transition sm:px-2 " +
+              "flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-[8px] px-1.5 py-1.5 text-xs font-medium transition sm:px-2 " +
               (tab === "live2d"
-                ? "bg-white text-gray-900 shadow-sm animate-[kpop_0.18s_ease-out] dark:bg-gray-700 dark:text-gray-100"
-                : "text-gray-500 hover:text-gray-700 dark:hover:text-gray-300")
+                ? "bg-surface text-fg shadow-[0_1px_0_rgba(0,0,0,0.04)] animate-[kpop_0.18s_ease-out] dark:shadow-none"
+                : "text-fg-muted hover:text-fg")
             }
           >
             <svg
@@ -1116,10 +1106,10 @@ export function AgentPanel({
             onClick={() => setTab("settings")}
             title="设置"
             className={
-              "flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md px-1.5 py-1.5 text-xs font-medium transition sm:px-2 " +
+              "hidden flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-[8px] px-1.5 py-1.5 text-xs font-medium transition sm:px-2 " +
               (tab === "settings"
-                ? "bg-white text-gray-900 shadow-sm animate-[kpop_0.18s_ease-out] dark:bg-gray-700 dark:text-gray-100"
-                : "text-gray-500 hover:text-gray-700 dark:hover:text-gray-300")
+                ? "bg-surface text-fg shadow-[0_1px_0_rgba(0,0,0,0.04)] animate-[kpop_0.18s_ease-out] dark:shadow-none"
+                : "text-fg-muted hover:text-fg")
             }
           >
             <svg
@@ -1150,592 +1140,467 @@ export function AgentPanel({
         key={tab}
         className="flex min-h-0 flex-1 flex-col animate-[kfade_0.22s_ease-out]"
       >
-        {/* TAB 1: Browse（美化版：搜索栏 + 结果卡片 + 来源折叠 + AI 文章） */}
-        {tab === "web" && (
+        {/* TAB 1: 产物（原 View 的搜索/浏览/文章生成已合并到这里） */}
+        {tab === "artifacts" && (
           <div className="flex min-h-0 flex-1 flex-col">
-            {/* 内容滚动区 */}
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              {/* 加载中：站点默认加载页（Think Different 打字机） */}
-              {webLoading && (
-                <div className="flex h-full flex-col items-center justify-center gap-4 px-6">
-                  <TypeWriter
-                    text="Think Different"
-                    className="text-lg font-medium tracking-[0.2em] text-gray-500 dark:text-gray-400"
-                  />
-                  <p className="font-mono text-xs text-gray-300 dark:text-gray-600">
-                    $ loading ...
-                  </p>
-                </div>
-              )}
-              {/* 空态：极简（无 logo/标题） */}
-              {!webLoading && !webContent && !webError && (
-                <div className="flex h-full items-center justify-center px-6 text-center">
-                  <p className="text-xs text-gray-300 dark:text-gray-600">
-                    在对话中搜索后，结果将显示在这里
-                  </p>
-                </div>
-              )}
-              {/* 失败/超时态：给出重试，而非误导性的空态 */}
-              {!webLoading && !webContent && webError && (
-                <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-                  <p className="text-xs text-gray-400 dark:text-gray-500">
-                    {webError}
-                  </p>
-                  <button
-                    onClick={() => browse(webUrl, true)}
-                    className="rounded-full border border-gray-200 bg-white px-4 py-1.5 text-xs text-gray-600 transition hover:border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-gray-500"
-                  >
-                    重新搜索
-                  </button>
-                </div>
-              )}
-              {/* 结果态：AI 文章为主 */}
-              {webContent && !webLoading && (
-                <div className="space-y-2.5 p-2.5">
-                  {/* AI 综合文章（主角） */}
-                  {(articleMd || articleLoading) && (
-                    <article className="overflow-hidden rounded-2xl border border-gray-100 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-900">
-                      <div className="flex items-center justify-end gap-2 border-b border-gray-100 px-3.5 py-2 dark:border-gray-800">
-                        {articleMd && (
-                          <button
-                            onClick={saveArticle}
-                            className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-gray-200 bg-white px-2 py-1 text-[10px] font-medium text-gray-500 transition hover:border-gray-300 hover:text-gray-700 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:border-gray-500 dark:hover:text-gray-200"
-                          >
-                            <svg
-                              className="h-3 w-3"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="1.8"
-                            >
-                              <path
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0111.186 0z"
-                              />
-                            </svg>
-                            保存到知识库
-                          </button>
-                        )}
-                      </div>
-                      <div className="px-4 py-4">
-                        {articleLoading ? (
-                          <div className="space-y-3">
-                            <div className="h-4 w-2/3 animate-pulse rounded bg-gray-100 dark:bg-gray-800" />
-                            <div className="h-3 w-full animate-pulse rounded bg-gray-100 dark:bg-gray-800" />
-                            <div className="h-3 w-11/12 animate-pulse rounded bg-gray-100 dark:bg-gray-800" />
-                            <div className="h-3 w-4/5 animate-pulse rounded bg-gray-100 dark:bg-gray-800" />
-                          </div>
-                        ) : (
-                          <PanelMarkdown content={articleMd} />
-                        )}
-                      </div>
-                    </article>
-                  )}
-                  {/* 文章生成失败兜底：重试 */}
-                  {!articleMd && !articleLoading && (
-                    <button
-                      onClick={() => browse(webUrl, true)}
-                      className="w-full rounded-2xl border border-dashed border-gray-200 bg-white/50 px-3.5 py-2.5 text-center text-[11px] text-gray-400 transition hover:border-gray-300 hover:text-gray-600 dark:border-gray-700 dark:bg-gray-900/50 dark:text-gray-500 dark:hover:border-gray-500 dark:hover:text-gray-300"
-                    >
-                      AI 文章生成失败，点击重新生成
-                    </button>
-                  )}
-                  {/* 对话续优化提示 */}
-                  {articleMd && !articleLoading && (
-                    <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50/60 px-3 py-2.5 text-center dark:border-gray-800 dark:bg-gray-800/40">
-                      <p className="text-[10px] leading-relaxed text-gray-400 dark:text-gray-500">
-                        在对话中继续提问，可让我优化这篇文章 （精简 / 改风格 /
-                        补充细节）
-                      </p>
+            {(() => {
+              const list = artifacts || [];
+              const current =
+                list.find((a) => a.id === activeArtifactId) || list[0];
+              // 产物页保持极简：列表 + 详情（不重复渲染活动卡）
+              const busyCurrent =
+                !!current &&
+                (webLoading || articleLoading) &&
+                !!webUrl &&
+                (current.topic === webUrl || current.title === webUrl);
+              return (
+                <>
+                  {artifactOpen && current ? (
+                    <div className="min-h-0 flex-1 overflow-y-auto">
+                      <ArtifactDetail
+                        artifact={current}
+                        busy={busyCurrent}
+                        onBack={() => setArtifactOpen(false)}
+                        onSaveToKb={() => saveArtifactToKb(current)}
+                        onDelete={() => {
+                          onDeleteArtifact?.(current.id);
+                          setArtifactOpen(false);
+                        }}
+                        onAsk={onAsk}
+                        onOpenKb={() => setTab("kb")}
+                        onRegenerate={
+                          current.kind === "article"
+                            ? () => {
+                                const q =
+                                  current.topic || current.title || webUrl;
+                                if (q) void browse(q, true);
+                              }
+                            : undefined
+                        }
+                      />
                     </div>
+                  ) : (
+                    <ArtifactList
+                      items={list}
+                      activeId={current?.id}
+                      onSelect={(id) => {
+                        onSelectArtifact?.(id);
+                        setArtifactOpen(true);
+                      }}
+                      onDelete={(id) => onDeleteArtifact?.(id)}
+                    />
                   )}
-                </div>
-              )}
-            </div>
+                </>
+              );
+            })()}
           </div>
         )}
 
         {/* TAB 2: Knowledge Base（紧凑头部 + 分类 tab + 条目网格） */}
         {tab === "kb" && (
           <div className="flex min-h-0 flex-1 flex-col">
-            {/* 头部：Notion 连接状态 + 来源分类筛选（全部/本机/Notion） */}
-            <div className="flex flex-none items-center gap-2 px-3 pt-2.5">
-              {hasNotionCfg() && (
-                <span
-                  className="flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-[11px] text-gray-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300"
-                  title={
-                    syncStatus.error ||
-                    "知识库与 Notion 自动双向同步（Notion 页面以卡片显示在下方）"
-                  }
-                >
-                  <NotionIcon className="h-3 w-3 text-gray-500 dark:text-gray-400" />
-                  {syncStatus.state === "syncing"
-                    ? "同步中…"
-                    : syncStatus.error
-                      ? "同步失败"
-                      : `Notion 已连接 · ${entries.filter((e) => e.notionId).length} 条已同步`}
-                </span>
-              )}
-              {hasNotionCfg() && entries.some((e) => !e.notionId) && (
-                <button
-                  onClick={handleMigrateToRoot}
-                  disabled={migrating}
-                  className="inline-flex shrink-0 items-center gap-1 rounded-full border border-dashed border-gray-200 bg-white px-2.5 py-1 text-[11px] text-gray-500 transition hover:border-gray-300 hover:text-gray-700 disabled:opacity-60 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-400 dark:hover:border-gray-500 dark:hover:text-gray-200"
-                  title="把本机未同步条目一次性迁移到 Notion「知识库」根页面（页面根目录下）"
-                >
+            {/* 头部：单行工具条（搜索 / Notion 状态 / ⋯ 操作），不再常驻大字提示 */}
+            <div className="flex flex-none items-center gap-1.5 px-2.5 pt-2.5">
+              {searchOpen ? (
+                <div className="flex h-8 min-w-0 flex-1 items-center gap-1.5 rounded-control border border-line bg-surface px-2">
                   <svg
-                    className="h-3 w-3"
+                    className="h-3.5 w-3.5 shrink-0 text-fg-muted"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
-                    strokeWidth="1.8"
+                    strokeWidth="2"
                   >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M12 16.5V9.75m0 0l3 3m-3-3l-3 3M6.75 19.5a4.5 4.5 0 01-1.41-8.775 5.25 5.25 0 0110.233-2.33 3 3 0 013.758 3.848A3.752 3.752 0 0118 19.5H6.75z"
-                    />
+                    <circle cx="11" cy="11" r="7" />
+                    <path strokeLinecap="round" d="M20 20l-3.5-3.5" />
                   </svg>
-                  {migrating ? "迁移中…" : "迁移到知识库"}
-                </button>
+                  <input
+                    autoFocus
+                    value={entrySearch}
+                    onChange={(e) => setEntrySearch(e.target.value)}
+                    placeholder="搜索页面…"
+                    className="min-w-0 flex-1 bg-transparent text-[13px] text-fg outline-none placeholder:text-fg-muted"
+                  />
+                  <button
+                    onClick={() => {
+                      setEntrySearch("");
+                      setSearchOpen(false);
+                    }}
+                    title="关闭搜索"
+                    aria-label="关闭搜索"
+                    className="grid h-5 w-5 shrink-0 cursor-pointer place-items-center rounded-full text-fg-muted transition hover:bg-sunken hover:text-fg"
+                  >
+                    <svg
+                      className="h-3.5 w-3.5"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    >
+                      <path strokeLinecap="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+              ) : (
+                <>
+                  {hasNotionCfg() && (
+                    <span
+                      className="flex min-w-0 items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-1 text-[11px] text-fg-muted"
+                      title={
+                        syncStatus.error ||
+                        (localUnsyncedCount > 0
+                          ? `本机 ${localUnsyncedCount} 条未同步，可在右侧 ⋯ 菜单迁移到 Notion`
+                          : "知识库与 Notion 自动双向同步")
+                      }
+                    >
+                      <NotionIcon className="h-3 w-3 shrink-0 text-fg-muted" />
+                      <span className="truncate">
+                        {syncStatus.state === "syncing"
+                          ? "同步中…"
+                          : syncStatus.error
+                            ? "同步失败"
+                            : `Notion · ${syncedCount}/${entries.length} 已同步`}
+                      </span>
+                    </span>
+                  )}
+                  <button
+                    onClick={() => setSearchOpen(true)}
+                    title="搜索页面"
+                    aria-label="搜索页面"
+                    className="ml-auto grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-control text-fg-muted transition hover:bg-sunken hover:text-fg"
+                  >
+                    <svg
+                      className="h-4 w-4"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                    >
+                      <circle cx="11" cy="11" r="7" />
+                      <path strokeLinecap="round" d="M20 20l-3.5-3.5" />
+                    </svg>
+                  </button>
+                </>
               )}
-              <button
-                onClick={() => {
-                  setActiveEntry(null);
-                  setMdContent("");
-                  setDraftParentId("");
-                  setTab("edit");
-                }}
-                className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-full bg-gray-900 px-3 py-1.5 text-[11px] font-medium text-white transition hover:bg-gray-700 active:scale-[0.98] dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
-                title="新建知识页面"
-              >
-                <svg
-                  className="h-3 w-3"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
+              {/* ⋯ 菜单：迁移到 Notion / 撤销 / 导入导出（原底部浮动面板里的操作全部上移） */}
+              <div className="relative shrink-0" ref={kbMenuRef}>
+                <button
+                  onClick={() => setKbMenuOpen((v) => !v)}
+                  title="更多操作"
+                  aria-label="更多操作"
+                  className="grid h-8 w-8 cursor-pointer place-items-center rounded-control text-fg-muted transition hover:bg-sunken hover:text-fg"
                 >
-                  <path strokeLinecap="round" d="M12 5v14M5 12h14" />
-                </svg>
-                新建页面
-              </button>
-            </div>
-            {/* 本地未同步提示（已连接 Notion 时页面树只显示 Notion 页面） */}
-            {hasNotionCfg() && localUnsyncedCount > 0 && (
-              <p className="flex-none px-3 pt-1.5 text-[10px] text-gray-400 dark:text-gray-500">
-                页面树仅显示 Notion 页面 · 本机 {localUnsyncedCount}{" "}
-                条未同步（点上方「迁移到知识库」合并）
-              </p>
-            )}
-            {/* Notion 式页面树 */}
-            <div className="relative flex min-h-0 flex-1 flex-col">
-              <div className="min-h-0 flex-1 overflow-y-auto p-1.5 pb-16">
-                <KbPageTree
-                  entries={treeEntries}
-                  activeId={activeEntry?.id}
-                  collapsed={collapsedPages}
-                  onToggleCollapse={toggleCollapsePage}
-                  onOpen={openEntryFromTree}
-                  onNewChild={startNewChild}
-                  onRename={handleRename}
-                  onRestoreAutoTitle={handleRestoreAutoTitle}
-                  onDelete={handleDeleteEntry}
-                  onReorder={handleReorder}
-                  onMove={handleMove}
-                  movingId={movingId}
-                  empty={
-                    hasNotionCfg()
-                      ? "知识库还没有页面，点击「＋ 新建页面」开始"
-                      : "暂无条目，点击「＋ 新建页面」开始"
-                  }
-                />
-              </div>
-              {/* 底部操作胶囊（类似 Live2D 切换角色）：单个胶囊 + 点击弹出操作面板 */}
-              <div className="absolute inset-x-0 bottom-4 z-20 flex flex-col items-center px-3">
-                {kbPanelOpen && (
-                  <div className="mb-2 w-full max-w-xs animate-[kpop_0.25s_ease-out] rounded-2xl border border-gray-200 bg-white/95 shadow-lg backdrop-blur dark:border-gray-700 dark:bg-gray-800/95">
-                    <div className="p-2">
-                      {multiSearchOpen ? (
-                        <>
-                          {/* 搜索模式：仅显示搜索输入框 + 关闭（隐藏其他功能） */}
-                          <div className="flex items-center gap-1.5 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 dark:border-gray-700 dark:bg-gray-900">
-                            <svg
-                              className="h-4 w-4 shrink-0 text-gray-400"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                            >
-                              <circle cx="11" cy="11" r="8" />
-                              <path
-                                strokeLinecap="round"
-                                d="M21 21l-4.35-4.35"
-                              />
-                            </svg>
-                            <input
-                              value={entrySearch}
-                              onChange={(e) => setEntrySearch(e.target.value)}
-                              placeholder="搜索条目…"
-                              className="min-w-0 flex-1 bg-transparent text-sm text-gray-700 outline-none placeholder:text-gray-400 dark:text-gray-200 dark:placeholder:text-gray-500"
-                              autoFocus
-                            />
-                            <button
-                              onClick={() => {
-                                setEntrySearch("");
-                                setMultiSearchOpen(false);
-                              }}
-                              title="关闭搜索"
-                              className="grid h-5 w-5 shrink-0 place-items-center rounded-full text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700"
-                            >
-                              <svg
-                                className="h-3.5 w-3.5"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                              >
-                                <path
-                                  strokeLinecap="round"
-                                  d="M6 18L18 6M6 6l12 12"
-                                />
-                              </svg>
-                            </button>
-                          </div>
-                        </>
-                      ) : (
-                        <>
-                          <>
-                            {/* 新建 + 搜索 */}
-                            <button
-                              onClick={() => {
-                                setActiveEntry(null);
-                                setMdContent("");
-                                setDraftParentId("");
-                                setTab("edit");
-                              }}
-                              title="新建知识条目"
-                              className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-gray-200 bg-gray-50/60 px-3 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-100 active:scale-[0.98] dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200"
-                            >
-                              <svg
-                                className="h-4 w-4"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                              >
-                                <path
-                                  strokeLinecap="round"
-                                  d="M12 5v14M5 12h14"
-                                />
-                              </svg>
-                              新建知识
-                            </button>
-                            <div className="mt-1.5 flex items-center gap-1.5">
-                              <button
-                                onClick={() => setMultiSearchOpen((v) => !v)}
-                                title={
-                                  multiSearchOpen ? "收起搜索" : "搜索条目"
-                                }
-                                className="flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-600 transition hover:bg-gray-50 active:scale-[0.98] dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300"
-                              >
-                                <svg
-                                  className="h-3.5 w-3.5"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="2"
-                                >
-                                  <circle cx="11" cy="11" r="8" />
-                                  <path
-                                    strokeLinecap="round"
-                                    d="M21 21l-4.35-4.35"
-                                  />
-                                </svg>
-                                搜索
-                              </button>
-                            </div>
-                          </>
-                        </>
-                      )}
-                    </div>
-                    {/* 底部：导入/导出（低调右对齐；菜单向上弹出避免手机溢出） */}
-                    {!multiSearchOpen && (
-                      <div className="px-2 pb-2">
-                        <div className="flex items-center justify-end border-t border-gray-100 pt-1.5 dark:border-gray-800">
-                          {hasKbSnapshot() && (
-                            <button
-                              onClick={handleUndo}
-                              title="撤销（恢复最近版本快照）"
-                              className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:text-gray-500 dark:hover:bg-gray-800 dark:hover:text-gray-300"
-                            >
-                              <svg
-                                className="h-3.5 w-3.5"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="1.8"
-                              >
-                                <path
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                  d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3"
-                                />
-                              </svg>
-                              撤销
-                            </button>
-                          )}
-                          <div className="relative ml-auto" ref={exportRef}>
-                            <button
-                              onClick={() => setShowExportMenu(!showExportMenu)}
-                              title="导入 / 导出"
-                              className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:text-gray-500 dark:hover:bg-gray-800 dark:hover:text-gray-300"
-                            >
-                              <svg
-                                className="h-3.5 w-3.5"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="1.8"
-                              >
-                                <path
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                  d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"
-                                />
-                              </svg>
-                              导入 / 导出
-                            </button>
-                            {showExportMenu && (
-                              <div className="absolute bottom-full right-0 z-30 mb-1 max-h-[50vh] w-40 overflow-y-auto rounded-xl border border-gray-200 bg-white py-1 shadow-xl dark:border-gray-700 dark:bg-gray-900">
-                                <button
-                                  onClick={exportJSON}
-                                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800"
-                                >
-                                  JSON
-                                </button>
-                                <button
-                                  onClick={exportMD}
-                                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800"
-                                >
-                                  Markdown
-                                </button>
-                                <div className="border-t border-gray-100 dark:border-gray-800" />
-                                <label className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800">
-                                  导入 JSON
-                                  <input
-                                    type="file"
-                                    accept=".json"
-                                    multiple
-                                    onChange={importJSON}
-                                    className="hidden"
-                                  />
-                                </label>
-                                <label className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800">
-                                  导入 Markdown
-                                  <input
-                                    type="file"
-                                    accept=".md,.markdown,.txt"
-                                    onChange={importMarkdown}
-                                    className="hidden"
-                                  />
-                                </label>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
+                  <svg
+                    className="h-4 w-4"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                  >
+                    <circle cx="5" cy="12" r="1.6" />
+                    <circle cx="12" cy="12" r="1.6" />
+                    <circle cx="19" cy="12" r="1.6" />
+                  </svg>
+                </button>
+                {kbMenuOpen && (
+                  <div className="absolute right-0 top-full z-30 mt-1 w-44 overflow-hidden rounded-card border border-line bg-surface py-1">
+                    {hasNotionCfg() && localUnsyncedCount > 0 && (
+                      <button
+                        onClick={() => {
+                          setKbMenuOpen(false);
+                          void handleMigrateToRoot();
+                        }}
+                        disabled={migrating}
+                        className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs text-fg-muted transition hover:bg-sunken hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {migrating
+                          ? "迁移中…"
+                          : `迁移到知识库（${localUnsyncedCount}）`}
+                      </button>
                     )}
+                    {hasKbSnapshot() && (
+                      <button
+                        onClick={() => {
+                          setKbMenuOpen(false);
+                          handleUndo();
+                        }}
+                        className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs text-fg-muted transition hover:bg-sunken hover:text-fg"
+                      >
+                        撤销
+                      </button>
+                    )}
+                    <div className="my-1 border-t border-line" />
+                    <button
+                      onClick={exportJSON}
+                      className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs text-fg-muted transition hover:bg-sunken hover:text-fg"
+                    >
+                      导出 JSON
+                    </button>
+                    <button
+                      onClick={exportMD}
+                      className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs text-fg-muted transition hover:bg-sunken hover:text-fg"
+                    >
+                      导出 Markdown
+                    </button>
+                    <div className="my-1 border-t border-line" />
+                    <label
+                      onClick={() => setKbMenuOpen(false)}
+                      className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs text-fg-muted transition hover:bg-sunken hover:text-fg"
+                    >
+                      导入 JSON
+                      <input
+                        type="file"
+                        accept=".json"
+                        multiple
+                        onChange={importJSON}
+                        className="hidden"
+                      />
+                    </label>
+                    <label
+                      onClick={() => setKbMenuOpen(false)}
+                      className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs text-fg-muted transition hover:bg-sunken hover:text-fg"
+                    >
+                      导入 Markdown
+                      <input
+                        type="file"
+                        accept=".md,.markdown,.txt"
+                        onChange={importMarkdown}
+                        className="hidden"
+                      />
+                    </label>
                   </div>
                 )}
-                {/* 单个胶囊按钮（无文字；点开时加号变上方向键） */}
-                <button
-                  onClick={() => {
-                    setKbPanelOpen((v) => {
-                      const nv = !v;
-                      if (!nv) {
-                        setMultiSearchOpen(false);
-                        setShowExportMenu(false);
-                      }
-                      return nv;
-                    });
-                  }}
-                  title="知识库操作"
-                  className="grid h-11 w-11 shrink-0 place-items-center rounded-full border border-gray-200/80 bg-white/95 text-gray-500 shadow-sm backdrop-blur transition hover:border-gray-300 hover:text-gray-700 hover:shadow active:scale-95 dark:border-gray-700 dark:bg-gray-800/95 dark:text-gray-300"
-                >
-                  <svg
-                    className={
-                      "h-5 w-5 transition-transform duration-200 " +
-                      (kbPanelOpen ? "rotate-180" : "")
-                    }
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                  >
-                    {kbPanelOpen ? (
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        d="M4.5 15.75l7.5-7.5 7.5 7.5"
-                      />
-                    ) : (
-                      <path strokeLinecap="round" d="M12 5v14M5 12h14" />
-                    )}
-                  </svg>
-                </button>
               </div>
+            </div>
+            {/* 两栏：页面树 + Obsidian 风格右栏（全屏 lg 以上） */}
+            <div className="flex min-h-0 flex-1">
+              <div className="relative flex min-h-0 flex-1 flex-col lg:border-r lg:border-line">
+                <div className="min-h-0 flex-1 overflow-y-auto p-1.5 pb-16">
+                  <KbPageTree
+                    entries={treeEntries}
+                    activeId={activeEntry?.id}
+                    collapsed={collapsedPages}
+                    onToggleCollapse={toggleCollapsePage}
+                    onOpen={openEntryFromTree}
+                    onNewChild={startNewChild}
+                    onRename={handleRename}
+                    onRestoreAutoTitle={handleRestoreAutoTitle}
+                    onDelete={handleDeleteEntry}
+                    onReorder={handleReorder}
+                    onMove={handleMove}
+                    movingId={movingId}
+                    empty={
+                      entrySearch.trim()
+                        ? "没有匹配的页面"
+                        : hasNotionCfg()
+                          ? "知识库还没有页面，点击下方 ＋ 新建"
+                          : "暂无条目，点击下方 ＋ 新建"
+                    }
+                  />
+                </div>
+                {/* 底部：新建页面（单击直达编辑器；搜索/导入导出已上移到头部） */}
+                <div className="pointer-events-none absolute inset-x-0 bottom-4 z-20 flex justify-center">
+                  <button
+                    onClick={startNewPage}
+                    title="新建页面"
+                    aria-label="新建页面"
+                    className="pointer-events-auto grid h-11 w-11 shrink-0 cursor-pointer place-items-center rounded-full border border-line bg-surface text-fg-muted transition hover:text-fg active:scale-95"
+                  >
+                    <svg
+                      className="h-5 w-5"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                    >
+                      <path strokeLinecap="round" d="M12 5v14M5 12h14" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <KbInsightPanel
+                entries={entries}
+                active={activeEntry || undefined}
+                onOpen={(id) => {
+                  const target = entries.find((x) => x.id === id);
+                  if (target) openEntryFromTree(target);
+                }}
+                onTag={(tag) => {
+                  setSearchOpen(true);
+                  setEntrySearch(`#${tag}`);
+                }}
+                notionReady={hasNotionCfg()}
+                syncedCount={syncedCount}
+                unsyncedCount={localUnsyncedCount}
+                syncing={syncStatus.state === "syncing"}
+                onSync={() => void handleMigrateToRoot()}
+                visible={!!fullscreen}
+              />
             </div>
           </div>
         )}
 
         {/* TAB 3: Editor（自动保存 + 返回知识库；已删除草稿/存为知识按钮） */}
         {tab === "edit" && (
-          <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex flex-none items-center gap-2 border-b border-gray-50 px-2 py-1.5 dark:border-gray-800">
-              <button
-                onClick={goBackToKb}
-                className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300"
-                title="返回知识库"
-                aria-label="返回知识库"
-              >
-                <svg
-                  className="h-4 w-4"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                >
-                  <path strokeLinecap="round" d="M19 12H5m7-7l-7 7 7 7" />
-                </svg>
-              </button>
-              <span className="min-w-0 truncate text-xs font-medium text-gray-600 dark:text-gray-300">
-                {activeEntry ? activeEntry.name : "新建条目"}
-              </span>
-              {!activeEntry && mdContent.trim() && (
-                <span className="ml-auto shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-[10px] text-gray-400 dark:bg-gray-800 dark:text-gray-500">
-                  自动保存
-                </span>
-              )}
-            </div>
-            {/* 新建条目：可选父页面（子页面；仅已同步 Notion 的页面可作为父） */}
-            {!activeEntry && (
-              <div className="flex flex-none items-center gap-1.5 border-b border-gray-50 px-2 py-1 dark:border-gray-800">
-                <span className="shrink-0 text-[10px] text-gray-400">子页</span>
-                <select
-                  value={draftParentId}
-                  onChange={(e) => setDraftParentId(e.target.value)}
-                  className="min-w-0 flex-1 rounded-md border border-gray-200 bg-white px-1.5 py-1 text-[11px] text-gray-600 outline-none dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300"
-                >
-                  <option value="">无（顶层页面）</option>
-                  {entries.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-            <KbEditorBoundary
-              fallbackValue={activeEntry ? activeEntry.content : mdContent}
-              onFallbackChange={activeEntry ? updateEntry : setMdContent}
-            >
-              <Suspense
-                fallback={
-                  <div className="grid flex-1 place-items-center text-[11px] text-gray-400">
-                    编辑器加载中…
-                  </div>
-                }
-              >
-                {activeEntry ? (
-                  <KbBlockEditor
-                    key={activeEntry.id}
-                    value={activeEntry.content}
-                    onChange={updateEntry}
-                    placeholder="在此输入内容…（首个 H1 或首行将作为标题）"
-                  />
-                ) : (
-                  <KbBlockEditor
-                    key="new"
-                    value={mdContent}
-                    onChange={setMdContent}
-                    placeholder="在此输入内容…（首个 H1 或首行将作为标题）"
-                  />
-                )}
-              </Suspense>
-            </KbEditorBoundary>
-            <div className="flex flex-none items-center justify-between gap-2 border-t border-gray-100 px-3 py-1.5 dark:border-gray-800">
-              <span className="min-w-0 truncate">
-                <span className="inline-flex items-center gap-1.5 rounded-full border border-gray-200/80 bg-white px-2.5 py-1 text-[11px] text-gray-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-400">
-                  {mdContent ? `${draftWordCount} 字` : "Markdown"}
-                  {draftSaved ? (
-                    <span className="flex items-center gap-0.5 font-medium text-green-600 dark:text-green-400">
-                      <svg
-                        className="h-3 w-3"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2.5"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          d="M5 13l4 4L19 7"
-                        />
-                      </svg>
-                      已保存
-                    </span>
-                  ) : (
-                    <span className="flex items-center gap-0.5 font-medium text-amber-500 dark:text-amber-400">
-                      <svg
-                        className="h-3 w-3 animate-spin"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                      >
-                        <circle
-                          className="opacity-25"
-                          cx="12"
-                          cy="12"
-                          r="10"
-                          stroke="currentColor"
-                          strokeWidth="4"
-                        />
-                        <path
-                          className="opacity-75"
-                          fill="currentColor"
-                          d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
-                        />
-                      </svg>
-                      保存中
-                    </span>
-                  )}
-                </span>
-              </span>
-              <div className="flex items-center gap-0.5">
-                {/* 清空 */}
+          <div className="flex min-h-0 flex-1">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+              <div className="flex flex-none items-center gap-2 border-b border-gray-50 px-2 py-1.5 dark:border-gray-800">
                 <button
-                  onClick={clearEditor}
-                  className="grid h-7 w-7 place-items-center rounded-lg text-gray-500 transition hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800"
-                  title="清空"
-                  aria-label="清空"
+                  onClick={goBackToKb}
+                  className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300"
+                  title="返回知识库"
+                  aria-label="返回知识库"
                 >
                   <svg
                     className="h-4 w-4"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
-                    strokeWidth="1.8"
+                    strokeWidth="2"
                   >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0"
-                    />
+                    <path strokeLinecap="round" d="M19 12H5m7-7l-7 7 7 7" />
                   </svg>
                 </button>
+                <span className="min-w-0 truncate text-xs font-medium text-gray-600 dark:text-gray-300">
+                  {activeEntry ? activeEntry.name : "新建条目"}
+                </span>
+                {!activeEntry && mdContent.trim() && (
+                  <span className="ml-auto shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-[10px] text-gray-400 dark:bg-gray-800 dark:text-gray-500">
+                    自动保存
+                  </span>
+                )}
+              </div>
+              {/* 新建条目：可选父页面（子页面；仅已同步 Notion 的页面可作为父） */}
+              {!activeEntry && (
+                <div className="flex flex-none items-center gap-1.5 border-b border-gray-50 px-2 py-1 dark:border-gray-800">
+                  <span className="shrink-0 text-[10px] text-gray-400">
+                    子页
+                  </span>
+                  <select
+                    value={draftParentId}
+                    onChange={(e) => setDraftParentId(e.target.value)}
+                    className="min-w-0 flex-1 rounded-md border border-gray-200 bg-white px-1.5 py-1 text-[11px] text-gray-600 outline-none dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300"
+                  >
+                    <option value="">无（顶层页面）</option>
+                    {entries.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <KbEditorBoundary
+                fallbackValue={activeEntry ? activeEntry.content : mdContent}
+                onFallbackChange={activeEntry ? updateEntry : setMdContent}
+              >
+                <Suspense
+                  fallback={
+                    <div className="grid flex-1 place-items-center text-[11px] text-gray-400">
+                      编辑器加载中…
+                    </div>
+                  }
+                >
+                  {activeEntry ? (
+                    <KbBlockEditor
+                      key={activeEntry.id}
+                      value={activeEntry.content}
+                      onChange={updateEntry}
+                      placeholder="在此输入内容…（首个 H1 或首行将作为标题）"
+                    />
+                  ) : (
+                    <KbBlockEditor
+                      key="new"
+                      value={mdContent}
+                      onChange={setMdContent}
+                      placeholder="在此输入内容…（首个 H1 或首行将作为标题）"
+                    />
+                  )}
+                </Suspense>
+              </KbEditorBoundary>
+              <div className="flex flex-none items-center justify-between gap-2 border-t border-gray-100 px-3 py-1.5 dark:border-gray-800">
+                <span className="min-w-0 truncate">
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-gray-200/80 bg-white px-2.5 py-1 text-[11px] text-gray-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-400">
+                    {mdContent ? `${draftWordCount} 字` : "Markdown"}
+                    {draftSaved ? (
+                      <span className="flex items-center gap-0.5 font-medium text-green-600 dark:text-green-400">
+                        <svg
+                          className="h-3 w-3"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2.5"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            d="M5 13l4 4L19 7"
+                          />
+                        </svg>
+                        已保存
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-0.5 font-medium text-amber-500 dark:text-amber-400">
+                        <svg
+                          className="h-3 w-3 animate-spin"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                        >
+                          <circle
+                            className="opacity-25"
+                            cx="12"
+                            cy="12"
+                            r="10"
+                            stroke="currentColor"
+                            strokeWidth="4"
+                          />
+                          <path
+                            className="opacity-75"
+                            fill="currentColor"
+                            d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
+                          />
+                        </svg>
+                        保存中
+                      </span>
+                    )}
+                  </span>
+                </span>
+                <div className="flex items-center gap-0.5">
+                  {/* 清空 */}
+                  <button
+                    onClick={clearEditor}
+                    className="grid h-7 w-7 place-items-center rounded-lg text-gray-500 transition hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800"
+                    title="清空"
+                    aria-label="清空"
+                  >
+                    <svg
+                      className="h-4 w-4"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0"
+                      />
+                    </svg>
+                  </button>
+                </div>
               </div>
             </div>
+            <KbInsightPanel
+              entries={entries}
+              active={activeEntry || undefined}
+              onOpen={(id) => {
+                const target = entries.find((x) => x.id === id);
+                if (target) openEntryFromTree(target);
+              }}
+              notionReady={hasNotionCfg()}
+              syncedCount={syncedCount}
+              unsyncedCount={localUnsyncedCount}
+              syncing={syncStatus.state === "syncing"}
+              onSync={() => void handleMigrateToRoot()}
+              visible={!!fullscreen}
+            />
           </div>
         )}
 

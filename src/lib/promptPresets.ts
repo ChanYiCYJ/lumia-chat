@@ -2,7 +2,7 @@
  * AI 助手系统提示词模板（BotEditorModal 预设 + 无提示词兜底）
  * ----------------------------------------------------------------
  * 「自我进化 AI」模板改编自 self-aware-ai-prompt skill，适配本站：
- * - 知识库（Coser/知识库 + assembleKnowledge 注入）
+ * - 知识库（知识条目 → formatKbEntriesForContext 注入）
  * - 本机记忆（memory）
  * - [KB-SAVE]/[KB-EDIT] 沉淀协议（AI 可将内容写入知识库）
  * 占位符：{botName}（AI 名称）、{ownerName}（所有者）

@@ -286,7 +286,7 @@ export function Live2DStage({ enabled = true }: { enabled?: boolean }) {
         {/* 换角色：悬浮胶囊叠加在 Live2D 画面上（适配角色画面），下拉面板浮在胶囊上方 */}
         <div className="absolute inset-x-0 bottom-6 z-10 flex flex-col items-center px-3">
           {panelOpen && (
-            <div className="mb-2 w-full max-w-xs animate-[kpop_0.25s_ease-out] overflow-hidden rounded-2xl border border-gray-200 bg-white/95 backdrop-blur dark:border-gray-700 dark:bg-gray-800/95">
+            <div className="mb-2 w-full max-w-xs animate-[kpop_0.25s_ease-out] overflow-hidden rounded-card border border-line bg-surface">
               {/* 头部：选择角色 / 角色资料 分段切换 */}
               <div className="flex gap-1 border-b border-gray-100 p-1.5 dark:border-gray-800">
                 <button
