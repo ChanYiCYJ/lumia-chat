@@ -233,21 +233,21 @@ export function subjectProgress(subject: StudySubject): StudyProgress {
   };
 }
 
-/** 生成课件的提示词（StudyMate 风格：先直觉，再定义/例子/误区，最后练习） */
+/** 生成课件的提示词：短、直接、可验证，避免套话与过度分点 */
 export function lessonPrompt(subject: StudySubject, node: StudyNode): string {
   return [
     `科目：${subject.name}`,
     subject.goal ? `学习目标：${subject.goal}` : "",
-    `当前知识点：${node.title}（${NODE_TYPE_LABEL[node.type]}课）`,
+    `知识点：${node.title}（${NODE_TYPE_LABEL[node.type]}）`,
     node.deps.length ? `前置知识点：${node.deps.join("、")}` : "",
     "",
-    "请用中文写一份可直接阅读的课件（Markdown）：",
-    "1. 一句话直觉：这个东西解决什么问题；",
-    "2. 核心定义与关键公式/接口（必要时给出符号说明）；",
-    "3. 一个从零推导或逐步实现的例子（代码/算式要能跑通或算对）；",
-    "4. 常见误区 2-3 条（每条说明为什么错）；",
-    "5. 3 道由易到难的练习（先题目，答案放在最后「答案」小节）。",
-    "不要输出与课件无关的寒暄；不要编造不存在的事实。",
+    "写一份 500-800 字的中文课件，直接讲知识本身：",
+    "1. 核心定义/结论（3 句内说清）；",
+    "2. 一个能算清或跑通的例子；",
+    "3. 2 条常见误区（说明错在哪）；",
+    "4. 3 道由易到难的练习，答案统一放最后「答案」小节。",
+    "",
+    "要求：不要开场白、不要总结套话、不要 emoji、不要吹嘘；标题层级最多三级；不确定的事实要写明。",
   ]
     .filter(Boolean)
     .join("\n");
@@ -257,7 +257,8 @@ export function lessonPrompt(subject: StudySubject, node: StudyNode): string {
 export function quizPrompt(subject: StudySubject, node: StudyNode): string {
   return [
     `科目：${subject.name}；知识点：${node.title}`,
-    "请出 3 道检验该知识点的题（由易到难，覆盖概念理解与动手计算/编码）。",
-    "格式：每题先写题目，再在新的一行给「答案：…」；不要只给答案。",
+    "出 3 道题（概念 1 道 + 计算/编码 2 道，由易到难）。",
+    "每题只写题目并标注考察点，答案统一放最后「答案」小节。",
+    "不要寒暄、鼓励语或额外说明。",
   ].join("\n");
 }

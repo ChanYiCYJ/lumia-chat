@@ -216,6 +216,7 @@ import {
 } from "../lib/live2dLore";
 import { pickLive2dCharacter } from "../lib/ai";
 import { parseDelta, resolveMaxTokens } from "../lib/providerPresets";
+import { completeText } from "../lib/complete";
 import type { AgentSettingsProps } from "./SettingsTab";
 import { useToast } from "../lib/toast";
 import { Live2DBackground } from "./Live2DBackground";
@@ -757,39 +758,6 @@ const AGENT_STATE_KEY = (pageId: number) => `kimo_ai_agent_state_${pageId}`;
 const VIEW_TOPIC_KEY = (pageId: number) => `kimo_ai_viewtopic_${pageId}`;
 /** 各会话最近生成的 View 文章简介持久化 key（AI 记忆用，避免每次对话重读整篇文章） */
 const VIEW_INTRO_KEY = (pageId: number) => `kimo_view_intro_${pageId}`;
-
-/** 单次补全（学习页 / 摘要等非聊天场景） */
-async function completeText(
-  cfg: AIChatConfig,
-  system: string,
-  user: string,
-): Promise<string> {
-  const res = await fetch(
-    cfg.endpoint.replace(/\/+$/, "") + "/chat/completions",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${cfg.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: cfg.model,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-        temperature: 0.6,
-        max_tokens: resolveMaxTokens(cfg.model, 2400),
-        stream: false,
-      }),
-    },
-  );
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const j = (await res.json()) as {
-    choices?: { message?: { content?: string } }[];
-  };
-  return String(j?.choices?.[0]?.message?.content || "").trim();
-}
 
 /** 判断用户消息是否与当前 View 文章相关（决定是否注入整篇全文 —— token 优化） */
 function viewArticleRelevant(userMsg: string, topic: string): boolean {
@@ -2990,7 +2958,9 @@ export function AIChat({
     try {
       beginStreaming();
       if (nativeEnabled) {
-        const injected = injectAttachments(recent);
+        // 原生工具通道：把完整历史交给 pi-agent-core，由 contextMode 按预算裁剪，
+        // 不再只保留最近 6 条（旧逻辑会让 AI 忘掉前文）。
+        const injected = injectAttachments(allMsgs);
         const historyMsgs = injected.slice(0, -1).map((m) => ({
           role: m.role,
           content: m.content,
@@ -5226,72 +5196,41 @@ export function AIChat({
             );
           })}
       </div>
-      {/* 底部：内嵌圆角卡片（额度 + 主题 + 站点名） */}
-      <div className="shrink-0 p-2.5">
-        <div className="rounded-xl border border-gray-200/70 bg-white/70 p-2 dark:border-gray-700/70 dark:bg-gray-900/70">
-          {dailyLimit > 0 && (
-            <div className="mt-2 space-y-1 px-1">
-              <div className="flex items-center justify-between text-[10px] text-gray-400 dark:text-gray-500">
-                <span>额度</span>
-                <span>
-                  {dailyRemaining}/{dailyLimit}
-                </span>
-              </div>
-              <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
-                <div
-                  className="h-full rounded-full bg-gray-400 transition-all duration-500 dark:bg-gray-500"
-                  style={{
-                    width: `${Math.round((dailyRemaining / dailyLimit) * 100)}%`,
-                  }}
-                />
-              </div>
-            </div>
-          )}
-          {/* 更多（设置）：侧边栏底部卡片 */}
-          <button
-            onClick={() => goNav("settings")}
-            className={
-              "mt-2 flex w-full cursor-pointer items-center gap-2 rounded-control border px-2 py-1.5 text-left transition " +
-              (mainView === "settings"
-                ? "border-accent/40 bg-accent/10"
-                : "border-line bg-surface hover:bg-sunken")
-            }
+      {/* 底部：设置入口（单行）+ 主题 + 站点名，不再用卡片堆叠 */}
+      <div className="shrink-0 border-t border-line/70 px-2.5 pb-2 pt-1.5">
+        {dailyLimit > 0 && (
+          <div className="mb-1 flex items-center justify-between px-1 text-[10px] text-fg-muted">
+            <span>额度</span>
+            <span className="tabular-nums">
+              {dailyRemaining}/{dailyLimit}
+            </span>
+          </div>
+        )}
+        <button
+          onClick={() => goNav("settings")}
+          className={
+            "flex w-full cursor-pointer items-center gap-1.5 rounded-[7px] px-1.5 py-1.5 text-left transition " +
+            (mainView === "settings"
+              ? "bg-sunken text-fg"
+              : "text-fg-muted hover:bg-sunken hover:text-fg")
+          }
+        >
+          <svg
+            className="h-3.5 w-3.5 shrink-0"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.7"
+            strokeLinecap="round"
+            strokeLinejoin="round"
           >
-            <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-sunken text-fg-muted">
-              <svg
-                className="h-4 w-4"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.7"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z" />
-              </svg>
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-xs font-medium text-fg">
-                更多
-              </span>
-              <span className="block truncate text-[10px] text-fg-muted">
-                设置 · 数据 · 关于
-              </span>
-            </span>
-            <svg
-              className="h-3.5 w-3.5 shrink-0 text-fg-muted"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-            >
-              <path d="M9 5l7 7-7 7" />
-            </svg>
-          </button>
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z" />
+          </svg>
+          <span className="flex-1 text-xs">设置</span>
+        </button>
           {/* 主题切换：Auto / 亮 / 暗 三态（默认 Auto 跟随系统） */}
-          <div className="mt-2 flex items-center rounded-lg bg-gray-100 p-0.5 dark:bg-gray-800">
+          <div className="mt-1 flex items-center gap-0.5">
             <button
               onClick={() => setThemeMode("auto")}
               title="自动（跟随系统）"
@@ -5355,20 +5294,19 @@ export function AIChat({
             </button>
           </div>
           {/* 站点标识：默认使用当前 AI 机器人的名称与头像（在 AI Chat 页面以 AI 作为站点） */}
-          <div className="mt-2 flex items-center gap-1.5 px-1">
+          <div className="mt-1.5 flex items-center gap-1.5 px-1">
             <BotAvatar
               src={avatar}
               name={config.botName || "AI"}
-              className="h-5 w-5"
+              className="h-4 w-4"
             />
-            <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-gray-400 dark:text-gray-500">
+            <span className="min-w-0 flex-1 truncate text-[10px] text-fg-muted">
               {config.botName || "AI 助手"}
             </span>
           </div>
-          <p className="px-1 pb-1 text-[10px] leading-relaxed text-gray-300 dark:text-gray-600">
+          <p className="px-1 pt-1 text-[9px] leading-relaxed text-fg-muted/70">
             AI 生成内容仅供参考
           </p>
-        </div>
       </div>
     </div>
   );

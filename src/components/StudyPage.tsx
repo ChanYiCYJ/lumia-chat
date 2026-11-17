@@ -26,24 +26,6 @@ import type { StudyNode, StudyNodeType, StudySubject } from "../lib/study";
 import { useToast } from "../lib/toast";
 import { ConfirmDialog } from "./ConfirmDialog";
 
-const TYPE_STYLE: Record<StudyNodeType, string> = {
-  concept: "bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300",
-  practice:
-    "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
-  lab: "bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300",
-};
-
-function ProgressBar({ pct }: { pct: number }) {
-  return (
-    <div className="h-1.5 w-full overflow-hidden rounded-full bg-sunken">
-      <div
-        className="h-full rounded-full bg-accent transition-all"
-        style={{ width: `${pct}%` }}
-      />
-    </div>
-  );
-}
-
 function TrashIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
   return (
     <svg
@@ -279,15 +261,13 @@ export function StudyPage({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface">
-      <div className="flex shrink-0 flex-wrap items-start justify-between gap-3 border-b border-line px-6 py-4">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3 sm:px-6">
         <div>
-          <h1 className="text-xl font-semibold text-fg">学习</h1>
-          <p className="mt-1 text-xs text-fg-muted">
-            科目 → 知识点路线图 → AI 课件 → 练习，进度保存在本机
-          </p>
+          <h1 className="text-base font-semibold text-fg">学习</h1>
+          <p className="mt-0.5 text-[11px] text-fg-muted">科目 · 课件 · 练习</p>
         </div>
         <button
-          className="cursor-pointer rounded-control bg-fg px-3 py-1.5 text-xs font-medium text-surface transition hover:opacity-90"
+          className="cursor-pointer rounded-control border border-line px-2.5 py-1 text-[11px] text-fg-muted transition hover:bg-sunken hover:text-fg"
           onClick={() => setNewOpen(true)}
         >
           + 新建科目
@@ -317,22 +297,17 @@ export function StudyPage({
                       setContentEdit(false);
                     }}
                     className={
-                      "w-full cursor-pointer rounded-control border px-2.5 py-2 pr-8 text-left transition " +
+                      "w-full cursor-pointer rounded-[7px] px-2 py-1.5 pr-8 text-left transition " +
                       (on
-                        ? "border-accent/40 bg-accent/10"
-                        : "border-line bg-surface hover:bg-sunken")
+                        ? "bg-sunken text-fg"
+                        : "text-fg-muted hover:bg-sunken hover:text-fg")
                     }
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-xs font-medium text-fg">
-                        {s.name}
-                      </span>
-                      <span className="shrink-0 text-[10px] text-fg-muted">
+                      <span className="truncate text-xs">{s.name}</span>
+                      <span className="shrink-0 text-[10px] tabular-nums opacity-70">
                         {p.done}/{p.total}
                       </span>
-                    </div>
-                    <div className="mt-1.5">
-                      <ProgressBar pct={p.pct} />
                     </div>
                   </button>
                   <div className="absolute right-1 top-1 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
@@ -416,9 +391,7 @@ export function StudyPage({
                         <path d="M4 20h4l10-10-4-4L4 16v4zM14 6l4 4" />
                       </svg>
                     </IconButton>
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-[10px] ${TYPE_STYLE[node.type]}`}
-                    >
+                    <span className="text-[10px] text-fg-muted">
                       {NODE_TYPE_LABEL[node.type]}
                     </span>
                     <span className="text-[10px] text-fg-muted">
@@ -582,11 +555,8 @@ export function StudyPage({
                   </button>
                 </div>
               </div>
-              <div className="mt-2">
-                <ProgressBar pct={progress?.pct || 0} />
-              </div>
 
-              <ul className="mt-4 space-y-1.5">
+              <ul className="mt-3 divide-y divide-line/60">
                 {subject.nodes.map((n, i) => (
                   <li key={n.id} className="group relative">
                     <button
@@ -595,7 +565,7 @@ export function StudyPage({
                         setNodeEdit(false);
                         setContentEdit(false);
                       }}
-                      className="flex w-full cursor-pointer items-center gap-2 rounded-control border border-line bg-surface px-2.5 py-2 pr-20 text-left transition hover:border-line-strong hover:bg-sunken"
+                      className="flex w-full cursor-pointer items-center gap-2 px-1 py-2 pr-20 text-left transition hover:bg-sunken"
                     >
                       <span className="w-5 shrink-0 text-center text-[10px] text-fg-muted">
                         {n.status === "done" ? "✓" : i + 1}
@@ -603,12 +573,9 @@ export function StudyPage({
                       <span className="min-w-0 flex-1 truncate text-xs text-fg">
                         {n.title}
                       </span>
-                      <span
-                        className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] ${TYPE_STYLE[n.type]}`}
-                      >
-                        {NODE_TYPE_LABEL[n.type]}
-                      </span>
                       <span className="shrink-0 text-[10px] text-fg-muted">
+                        {NODE_TYPE_LABEL[n.type]}
+                        {" · "}
                         {n.status === "done"
                           ? "已完成"
                           : n.content

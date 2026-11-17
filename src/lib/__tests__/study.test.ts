@@ -107,9 +107,10 @@ describe("学习系统（数据层）", () => {
   it("提示词包含关键结构", () => {
     const s = createSubject("概率论", "考试", [{ title: "条件概率" }])!;
     const p = lessonPrompt(s, s.nodes[0]);
-    expect(p).toContain("直觉");
+    expect(p).toContain("核心定义");
     expect(p).toContain("常见误区");
     expect(p).toContain("练习");
+    expect(p).toContain("不要开场白");
     expect(quizPrompt(s, s.nodes[0])).toContain("答案");
   });
 });
