@@ -35,19 +35,46 @@ describe("SRS 调度", () => {
   });
 
   it("间隔按易度增长，hard 与 again 降级", () => {
-    const grown = schedule({ ...base, interval: 10, ease: 2.3, reps: 3 }, "good", 0);
+    const grown = schedule(
+      { ...base, interval: 10, ease: 2.3, reps: 3 },
+      "good",
+      0,
+    );
     expect(grown.interval).toBe(23);
-    const hard = schedule({ ...base, interval: 10, ease: 2.3, reps: 3 }, "hard", 0);
+    const hard = schedule(
+      { ...base, interval: 10, ease: 2.3, reps: 3 },
+      "hard",
+      0,
+    );
     expect(hard.interval).toBe(12);
     expect(hard.ease).toBeLessThan(2.3);
-    expect(intervalLabel({ ...base, id: "x", subjectId: "", nodeId: "", front: "", back: "", due: 0, createdAt: 0, updatedAt: 0 } as never, "good")).toBe("1 天");
+    expect(
+      intervalLabel(
+        {
+          ...base,
+          id: "x",
+          subjectId: "",
+          nodeId: "",
+          front: "",
+          back: "",
+          due: 0,
+          createdAt: 0,
+          updatedAt: 0,
+        } as never,
+        "good",
+      ),
+    ).toBe("1 天");
   });
 });
 
 describe("卡片存储", () => {
   it("添加去重 + 按节点/到期筛选 + 评分落库", () => {
-    expect(addCards("s1", "n1", [{ front: "什么是向量", back: "带方向的量" }])).toBe(1);
-    expect(addCards("s1", "n1", [{ front: "什么是向量", back: "重复" }])).toBe(0);
+    expect(
+      addCards("s1", "n1", [{ front: "什么是向量", back: "带方向的量" }]),
+    ).toBe(1);
+    expect(addCards("s1", "n1", [{ front: "什么是向量", back: "重复" }])).toBe(
+      0,
+    );
     expect(cardsForNode("n1")).toHaveLength(1);
     expect(dueCards("s1")).toHaveLength(1);
 

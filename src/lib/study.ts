@@ -2,7 +2,8 @@
  * 学习系统（借鉴 StudyMate 的「科目 → 大纲 → 课件 → 练习」工作流）
  * ------------------------------------------------------------------
  * 纯数据 + 纯函数；存储 localStorage `kimo_study_v1`。
- * 页面见 components/StudyPage.tsx；AI 工具见 agent/plugins/studyPlugin.ts。
+ * 交互在对话里完成（components/StudyChatCard.tsx），后台页面见
+ * components/StudyWorkspace.tsx，AI 工具见 agent/plugins/studyPlugin.ts。
  */
 
 export type StudyNodeType = "concept" | "practice" | "lab";
@@ -63,6 +64,29 @@ export function saveSubjects(list: StudySubject[]): void {
 
 export function findSubject(id: string): StudySubject | undefined {
   return loadSubjects().find((s) => s.id === id);
+}
+
+/** 按 id 或名称（忽略大小写与首尾空白）找科目 */
+export function resolveSubject(key: string): StudySubject | undefined {
+  const k = (key || "").trim().toLowerCase();
+  if (!k) return undefined;
+  return loadSubjects().find(
+    (s) => s.id === key || s.name.trim().toLowerCase() === k,
+  );
+}
+
+/** 按 id / 精确标题 / 包含标题找知识点；key 为空时返回当前建议学习的节点 */
+export function resolveNode(
+  subject: StudySubject,
+  key?: string,
+): StudyNode | undefined {
+  const k = (key || "").trim().toLowerCase();
+  if (!k) return subjectProgress(subject).current;
+  return (
+    subject.nodes.find((n) => n.id === key) ||
+    subject.nodes.find((n) => n.title.trim().toLowerCase() === k) ||
+    subject.nodes.find((n) => n.title.toLowerCase().includes(k))
+  );
 }
 
 export function createSubject(
@@ -263,4 +287,26 @@ export function quizPrompt(subject: StudySubject, node: StudyNode): string {
     "答：答案（≤60 字）",
     "不要出现「以下是」「希望能帮到你」这类套话。",
   ].join("\n");
+}
+
+/** 课件系统提示（后台生成用：与聊天主提示分离，避免人设干扰知识准确性） */
+export const LESSON_SYSTEM =
+  "你是严谨、耐心的中文学习教练。只输出课件本身：Markdown，公式用 $...$，代码块标注语言；不确定的事实要写明。";
+
+/** 出题系统提示 */
+export const QUIZ_SYSTEM =
+  "你是出题人。只输出「问：/答：」格式的题目，不要开场白、编号或解释。";
+
+/** 校验/清洗 AI 课件：去围栏、拒绝过短与套话，返回可保存的 Markdown（不合格直接抛错） */
+export function normalizeLesson(text: string): string {
+  const clean = (text || "")
+    .trim()
+    .replace(/^```(?:markdown|md)?\s*/i, "")
+    .replace(/```\s*$/, "")
+    .trim();
+  if (clean.length < 80) throw new Error("课件太短，重新生成一次");
+  if (/作为一个?\s*AI|我无法|以下是为你准备/.test(clean)) {
+    throw new Error("课件内容不合规，重新生成一次");
+  }
+  return clean;
 }

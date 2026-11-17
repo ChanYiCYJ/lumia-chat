@@ -6,6 +6,7 @@ import {
   lessonPrompt,
   loadSubjects,
   moveNode,
+  normalizeLesson,
   quizPrompt,
   removeNode,
   removeSubject,
@@ -14,6 +15,7 @@ import {
   updateSubject,
 } from "../study";
 import { createAgentTools } from "../agent/plugins";
+import { loadCards } from "../srs";
 
 const ctx = {
   pageId: 1,
@@ -123,6 +125,9 @@ describe("学习插件（工具层）", () => {
       outline: ["线性回归|concept", "梯度下降|practice"],
     });
     expect(text(added)).toContain("已创建科目");
+    expect(
+      (added as unknown as { details: { card: unknown } }).details.card,
+    ).toEqual({ kind: "plan", subjectId: loadSubjects()[0].id });
 
     const list = await tool("study_list").execute("2", {});
     expect(text(list)).toContain("机器学习");
@@ -135,5 +140,104 @@ describe("学习插件（工具层）", () => {
     });
     expect(text(marked)).toContain("已标记");
     expect(subjectProgress(loadSubjects()[0]).pct).toBe(50);
+  });
+
+  it("同名科目只补知识点，不重复创建", async () => {
+    await tool("study_add_subject").execute("1", {
+      name: "机器学习",
+      outline: ["线性回归", "梯度下降"],
+    });
+    const again = await tool("study_add_subject").execute("2", {
+      name: "机器学习",
+      outline: ["线性回归", "正则化"],
+    });
+    expect(text(again)).toContain("已存在");
+    expect(text(again)).toContain("1 个知识点");
+    expect(loadSubjects()).toHaveLength(1);
+    expect(loadSubjects()[0].nodes).toHaveLength(3);
+  });
+});
+
+const LESSON =
+  "# 线性回归\n\n" + "最小二乘用残差平方和最小化来求参数。".repeat(6);
+const QUIZ =
+  "问：梯度下降的更新方向？\n答：负梯度方向\n问：学习率过大？\n答：会震荡不收敛\n问：为什么要归一化？\n答：让各维尺度一致";
+
+/** 带后台生成能力的工具上下文（system 区分课件/出题） */
+const genCtx = {
+  ...ctx,
+  generate: async (system: string) =>
+    system.includes("学习教练") ? LESSON : QUIZ,
+};
+
+function genTool(name: string, extra: object = {}) {
+  const t = createAgentTools({ ...genCtx, ...extra }).find(
+    (x) => x.name === name,
+  );
+  if (!t) throw new Error(`missing ${name}`);
+  return t;
+}
+
+type WithCard = {
+  details: { card: { kind: string; subjectId: string; nodeId: string } };
+};
+
+describe("学习插件（对话卡片）", () => {
+  it("study_teach 生成课件并返回课件卡；已有课件不重复生成", async () => {
+    const s = createSubject("机器学习", "", [{ title: "线性回归" }])!;
+    const r = (await genTool("study_teach").execute("1", {
+      subject: "机器学习",
+      node: "线性回归",
+    })) as unknown as WithCard;
+    expect(r.details.card).toEqual({
+      kind: "lesson",
+      subjectId: s.id,
+      nodeId: s.nodes[0].id,
+    });
+    const saved = loadSubjects()[0].nodes[0];
+    expect(saved.content).toContain("最小二乘");
+    expect(saved.status).toBe("doing");
+
+    let called = 0;
+    const again = await genTool("study_teach", {
+      generate: async () => {
+        called += 1;
+        return LESSON;
+      },
+    }).execute("2", { subject: "机器学习", node: "线性回归" });
+    expect(text(again)).toContain("已有课件");
+    expect(called).toBe(0);
+  });
+
+  it("study_practice 出题建卡并返回练习卡；已有卡片直接复用", async () => {
+    const s = createSubject("机器学习", "", [{ title: "梯度下降" }])!;
+    const r = (await genTool("study_practice").execute("1", {
+      subject: "机器学习",
+      node: "梯度下降",
+    })) as unknown as WithCard;
+    expect(r.details.card).toEqual({
+      kind: "practice",
+      subjectId: s.id,
+      nodeId: s.nodes[0].id,
+    });
+    expect(loadCards()).toHaveLength(3);
+
+    const again = await genTool("study_practice").execute("2", {
+      subject: "机器学习",
+      node: "梯度下降",
+    });
+    expect(text(again)).toContain("已有 3 张练习卡");
+    expect(loadCards()).toHaveLength(3);
+  });
+
+  it("缺少后台生成能力 / 课件不合规时明确报错", async () => {
+    createSubject("测试科目", "", [{ title: "A" }]);
+    await expect(
+      tool("study_teach").execute("1", { subject: "测试科目" }),
+    ).rejects.toThrow("后台生成");
+    expect(() => normalizeLesson("太短")).toThrow("课件太短");
+    expect(() => normalizeLesson("作为一个 AI 我无法" + "x".repeat(100))).toThrow(
+      "不合规",
+    );
   });
 });

@@ -117,6 +117,15 @@ import { AgentPanel } from "./AgentPanel";
 import { PluginsPage } from "./PluginsPage";
 import { PowerlineFooter } from "./PowerlineFooter";
 import { StudyWorkspace } from "./StudyWorkspace";
+import { StudyChatCard } from "./StudyChatCard";
+import {
+  cardFromToolResult,
+  errorFromToolResult,
+  isStudyCardTool,
+  pendingCardForTool,
+  reviveStudyCards,
+  type StudyChatCardRef,
+} from "../lib/studyChat";
 import type { ActivityItem } from "./AgentActivityCard";
 import { extractSourceLinks } from "../lib/messageCards";
 // 性能优化：AgentPanel 是重型组件（含编辑器/知识库/Live2D 等）且桌面+移动双实例渲染；
@@ -228,6 +237,8 @@ interface Message {
   content: string;
   /** 附加的知识库条目（对话中以卡片展示，AI 上下文仍会注入内容） */
   attachments?: { id: string; title: string; content: string }[];
+  /** 学习卡片（课件/练习/复习/路线）：只存引用，内容实时从学习库读取 */
+  studyCards?: StudyChatCardRef[];
 }
 
 /**
@@ -394,6 +405,9 @@ const MessageItem = memo(function MessageItem({
   onOpenAgent,
   feedbackRating,
   onFeedback,
+  busy,
+  onStudyAsk,
+  onOpenStudy,
 }: {
   m: Message;
   index: number;
@@ -408,6 +422,12 @@ const MessageItem = memo(function MessageItem({
   onOpenAgent: (url: string | undefined) => void;
   feedbackRating: 0 | 1 | -1;
   onFeedback: (index: number, rating: 1 | -1) => void;
+  /** 正在生成回复：卡片动作暂时禁用 */
+  busy: boolean;
+  /** 学习卡片动作（回到对话发一条请求） */
+  onStudyAsk: (text: string) => void;
+  /** 打开学习库（AI 后台数据） */
+  onOpenStudy: (subjectId?: string) => void;
 }) {
   /** 回复中的链接（≥2 时渲染「参考来源」卡；流式中不解析，避免每帧扫描） */
   const sourceLinks = useMemo(
@@ -495,6 +515,21 @@ const MessageItem = memo(function MessageItem({
               ))}
             </div>
           )}
+
+        {/* 学习卡片：课件 / 练习 / 复习 / 路线（内容实时读学习库） */}
+        {m.role === "assistant" && m.studyCards && m.studyCards.length > 0 && (
+          <div>
+            {m.studyCards.map((c, ci) => (
+              <StudyChatCard
+                key={`${c.kind}-${c.subjectId || ""}-${c.nodeId || ""}-${ci}`}
+                card={c}
+                busy={busy}
+                onAsk={onStudyAsk}
+                onOpen={onOpenStudy}
+              />
+            ))}
+          </div>
+        )}
 
         {m.role === "assistant" && (
           <div
@@ -1321,7 +1356,19 @@ export function AIChat({
       const r = localStorage.getItem(SESSION_STORAGE(pageId));
       if (r) {
         const p = JSON.parse(r);
-        if (Array.isArray(p) && p.length) return p;
+        if (Array.isArray(p) && p.length) {
+          // 学习卡片只保留已经落地的（生成中/失败是临时态，刷新后不再展示）
+          return (p as Session[]).map((s) => ({
+            ...s,
+            messages: Array.isArray(s.messages)
+              ? s.messages.map((m) =>
+                  m.studyCards
+                    ? { ...m, studyCards: reviveStudyCards(m.studyCards) }
+                    : m,
+                )
+              : [],
+          }));
+        }
       }
     } catch {}
     return [
@@ -1380,6 +1427,8 @@ export function AIChat({
   const [mainView, setMainView] = useState<
     "chat" | "kb" | "plugins" | "settings" | "study"
   >("chat");
+  /** 学习库当前聚焦的科目（从对话卡片点「学习库」进入时定位） */
+  const [studyFocusId, setStudyFocusId] = useState<string | undefined>();
   /** 顶栏高度（全屏页从顶栏下方开始，不遮挡顶栏） */
   const [headerH, setHeaderH] = useState(56);
   const headerRef = useRef<HTMLDivElement>(null);
@@ -1923,6 +1972,19 @@ export function AIChat({
     setAgentEditContent(undefined);
     setAgentOpen(true);
   }, []);
+
+  /** 学习卡片动作：回到对话再发请求（全屏页挡着时也能直接开始） */
+  const handleStudyAsk = useCallback((text: string) => {
+    setMainView("chat");
+    window.setTimeout(() => void sendRef.current(text), 50);
+  }, []);
+
+  /** 学习卡片 → 学习库（AI 后台数据） */
+  const handleOpenStudy = useCallback((subjectId?: string) => {
+    if (subjectId) setStudyFocusId(subjectId);
+    setMainView("study");
+    setAgentOpen(false);
+  }, []);
   // Agent 面板宽度拖拽：拖拽期间直接改 DOM 宽度（不触发 React 重渲染），松手才提交 state
   const onResizeDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -2217,6 +2279,62 @@ export function AIChat({
       });
     },
     [activeId, persistSessions],
+  );
+
+  /** 把学习卡片挂到当前回复（工具开始时先占位，结束原地替换，实现「实时出现」） */
+  const pushStudyCard = useCallback(
+    (ref: StudyChatCardRef) => {
+      updateActive((prev) => {
+        const last = prev[prev.length - 1];
+        if (last?.role === "assistant") {
+          return [
+            ...prev.slice(0, -1),
+            { ...last, studyCards: [...(last.studyCards || []), ref] },
+          ];
+        }
+        return [
+          ...prev,
+          { role: "assistant" as const, content: "", studyCards: [ref] },
+        ];
+      });
+    },
+    [updateActive],
+  );
+
+  /** 工具结束：用真实引用替换最后一张占位卡；失败则把原因写在同位置 */
+  const settleStudyCard = useCallback(
+    (ref: StudyChatCardRef | null, error?: string) => {
+      updateActive((prev) => {
+        const last = prev[prev.length - 1];
+        if (!last || last.role !== "assistant" || !last.studyCards?.length) {
+          return ref
+            ? [...prev, { role: "assistant" as const, content: "", studyCards: [ref] }]
+            : prev;
+        }
+        const cards = [...last.studyCards];
+        let hit = -1;
+        for (let i = cards.length - 1; i >= 0; i--) {
+          if (cards[i].pending) {
+            hit = i;
+            break;
+          }
+        }
+        if (hit < 0) {
+          if (!ref) return prev;
+          cards.push(ref);
+        } else if (ref) {
+          cards[hit] = ref;
+        } else {
+          cards[hit] = {
+            ...cards[hit],
+            pending: false,
+            error: error || "生成失败，可重试",
+          };
+        }
+        return [...prev.slice(0, -1), { ...last, studyCards: cards }];
+      });
+    },
+    [updateActive],
   );
 
   const newSession = useCallback(() => {
@@ -2889,7 +3007,7 @@ export function AIChat({
       updateActive((prev) => {
         const last = prev[prev.length - 1];
         return last && last.role === "assistant"
-          ? [...prev.slice(0, -1), { role: "assistant" as const, content }]
+          ? [...prev.slice(0, -1), { ...last, content }]
           : [...prev, { role: "assistant" as const, content }];
       });
     });
@@ -3023,6 +3141,9 @@ export function AIChat({
               }
             },
             onArtifactRemoved: deleteArtifact,
+            /** 课件/出题在工具内部后台生成，与聊天共用当前模型配置 */
+            generate: (system, user, opts) =>
+              completeText(effCfgRef.current, system, user, opts),
           },
           onToken: upsertAssistant,
           onToolStart: (info) => {
@@ -3058,6 +3179,9 @@ export function AIChat({
                 toolCallId: info.toolCallId,
               },
             ]);
+            // 学习类工具：卡片先以「生成中」出现，结束后原地填充
+            const pendingCard = pendingCardForTool(info.toolName, info.args);
+            if (pendingCard) pushStudyCard(pendingCard);
           },
           onToolEnd: (info) => {
             setToolCalls((prev) =>
@@ -3067,6 +3191,13 @@ export function AIChat({
                   : tc,
               ),
             );
+            if (!isStudyCardTool(info.toolName)) return;
+            if (info.isError) {
+              settleStudyCard(null, errorFromToolResult(info.result));
+              return;
+            }
+            const cardRef = cardFromToolResult(info.result);
+            settleStudyCard(cardRef, cardRef ? undefined : "没有生成内容");
           },
           onArtifact: (artifact) => {
             refreshArtifacts();
@@ -3835,17 +3966,6 @@ export function AIChat({
     setLocalCfg(getLocalCfg(pageId));
   }, [pageId]);
 
-  /** 学习页：直接用当前模型生成课件/题目 */
-  const generateStudy = useCallback(
-    (prompt: string) =>
-      completeText(
-        effCfgRef.current,
-        "你是严谨、耐心的中文学习教练。输出 Markdown：公式用 $...$，代码块标注语言；不确定的事实要说明。",
-        prompt,
-      ),
-    [],
-  );
-
   // 「让 AI 继续」：产物详情里的续优化入口，需保持引用稳定（AgentPanel 是 memo 组件）
   const askAgent = useCallback((text: string) => {
     void sendRef.current(text);
@@ -4437,6 +4557,9 @@ export function AIChat({
                         onOpenAgent={handleOpenAgent}
                         feedbackRating={feedbackRatingMap[i] || 0}
                         onFeedback={handleMessageFeedback}
+                        busy={loading}
+                        onStudyAsk={handleStudyAsk}
+                        onOpenStudy={handleOpenStudy}
                       />
                     ))}
                     {/* 极简执行态：一行状态（搜索/生成 + 当前动作 + 条数），无卡片无骸架 */}
@@ -5027,7 +5150,7 @@ export function AIChat({
             },
             {
               id: "study",
-              label: "学习",
+              label: "学习库",
               d: "M12 14l9-5-9-5-9 5 9 5zm0 0l6.16-3.422A12.083 12.083 0 0112 21a12.08 12.08 0 01-6.16-10.422L12 14z",
             },
           ] as const
@@ -5455,7 +5578,13 @@ export function AIChat({
                 }}
               />
             ) : mainView === "study" ? (
-              <StudyWorkspace onGenerate={generateStudy} />
+              <StudyWorkspace
+                onAsk={(t) => {
+                  setMainView("chat");
+                  window.setTimeout(() => void sendRef.current(t), 50);
+                }}
+                focusSubjectId={studyFocusId}
+              />
             ) : (
               <div className="flex h-full min-h-0 flex-col bg-surface">
                 {/* 页面标题（全屏页保留顶栏与侧边栏） */}

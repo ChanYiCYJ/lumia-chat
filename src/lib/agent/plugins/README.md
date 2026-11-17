@@ -19,7 +19,7 @@ src/lib/agent/
 │   ├── notionPlugin.ts     # Notion：notion_query（guard：未配置 Token 直接拒绝）
 │   ├── live2dPlugin.ts     # 角色：live2d_perform（+ TAG 清洗正则）
 │   ├── todoPlugin.ts       # 待办：todo_add / todo_list / todo_done …
-│   ├── studyPlugin.ts      # 学习：建科目 / 排知识点 / 勾进度
+│   ├── studyPlugin.ts      # 学习：建科目 / 讲课件 / 出题（对话卡片）
 │   ├── ankiPlugin.ts       # 间隔重复：anki_due / anki_add_cards
 │   ├── mcpPlugin.ts        # MCP：动态挂载外部服务工具 + mcp_refresh
 │   ├── forge.ts            # 插件工厂引擎（声明式 DSL 解释器，无 eval）
@@ -135,11 +135,18 @@ export default {
 
 ## 学习与间隔重复
 
-学习页（`components/StudyWorkspace.tsx`）不提供手动「生成课件」按钮：
-打开知识点自动生成课件，切到「练习」自动出题；`lib/srs.ts` 负责把问答转成卡片并按
-Again/Hard/Good/Easy 调度（纯函数，可单测）。复习评分在学习页完成，Agent 侧的
-`ankiPlugin` 只负责 `anki_due`（查到期）与 `anki_add_cards`（建卡），不去冒充
-“已经复习”。卡片数据与学习页共用 `kimo_study_cards_v1`。
+学习的主舞台是对话：`studyPlugin` 的 `study_teach` / `study_practice` 会在工具内部
+调用当前模型生成课件与题目，并通过 `details.card` 声明要展示哪张卡片；AIChat 在
+`onToolStart` 先挂一张「生成中」占位卡，`onToolEnd` 原地替换成真实卡片（消息里的
+`studyCards` 只存科目/知识点 id，内容实时读学习库，不在会话里复制正文）。
+
+- 路线卡（`study_add_subject` / `study_add_nodes`）：科目、目标、进度与知识点路线
+- 课件卡（`study_teach`）：Markdown 课件 + 出题入口；已有课件时直接复用
+- 练习卡（`study_practice` / `anki_add_cards`）：逐张看答案 → 四档评分，直接写入 `srs.ts`
+- 复习卡（`anki_due`）：跨科目到期队列；没有到期时提示下一张的时间
+
+`components/StudyWorkspace.tsx` 已降级为「学习库」：只展示与删除后台数据，
+不再生成课件/出题/跑复习，避免两套流程相互打架。
 
 ## 运行时动态挂载
 

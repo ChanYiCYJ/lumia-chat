@@ -1,27 +1,23 @@
 /**
- * Anki 式复习插件：把知识点整理成「问/答」记忆卡，按间隔重复复习
+ * Anki 式复习插件
  * ------------------------------------------------------------------
- * 卡片与学习页共用 srs.ts 存储；Agent 负责建卡/查到期，
- * 评分与排队在学习页「练习 / 今日复习」里完成。
+ * 到期队列与建卡。复习本身发生在对话卡片里（StudyChatCard 的评分按钮），
+ * 卡片评分直接写入 srs.ts 的调度，Agent 只负责「查」与「加」，不冒充复习。
  */
 import type { AgentPlugin } from "./types";
 import { fail, ok } from "./shared";
-import { loadSubjects, updateNode } from "../../study";
-import type { StudySubject } from "../../study";
-import { addCards, dueCards, srsStats } from "../../srs";
+import {
+  cardsForNode,
+  dueCards,
+  addCards,
+  srsStats,
+} from "../../srs";
+import { resolveNode, resolveSubject, updateNode } from "../../study";
 
-function pickSubject(key: string): StudySubject | undefined {
-  const k = (key || "").trim().toLowerCase();
-  return loadSubjects().find(
-    (s) => s.id === key || s.name.trim().toLowerCase() === k,
-  );
-}
-
-function pickNode(subject: StudySubject, key: string) {
-  const k = (key || "").trim().toLowerCase();
-  return subject.nodes.find(
-    (n) => n.id === key || n.title.trim().toLowerCase() === k,
-  );
+function requireSubject(key: string) {
+  const s = resolveSubject(key);
+  if (!s) fail(`没有找到科目：${key || "(空)"}`);
+  return s as NonNullable<typeof s>;
 }
 
 const plugin: AgentPlugin = {
@@ -35,9 +31,9 @@ const plugin: AgentPlugin = {
   },
 
   promptLines: () =>
-    `- 【复习】练习用 Anki 式间隔重复：学习页打开知识点会自动生成课件，切到「练习」自动出题建卡；到期的卡出现在「今日复习」。
-- 用户说「把这些整理成记忆卡 / 帮我背 / 出点题」时，用 anki_add_cards 建卡：front 是一个具体问题（≤60 字），back 是可直接判断的答案（≤80 字），一次最多 10 张，不要把整段课件当答案。
-- 用户问「今天要复习什么」先 anki_due 查到期数量；具体复习由用户在「学习」页完成，你不要凭空说已经复习。
+    `- 【复习】用户问「今天要复习什么」：anki_due。到期卡片会直接在对话里显示，用户点评分即可完成复习。
+- 普通练习优先 study_practice（会自动出题建卡）；只有用户明确要求补卡/整理记忆卡时才用 anki_add_cards：front 是具体问题（≤60 字），back 是可判断的答案（≤80 字），一次最多 10 张。
+- 不要凭空说“已经复习 / 已经记住”：真实评分只发生在卡片里，你只报告到期数量与结果。
 `,
 
   tools: () => [
@@ -56,13 +52,13 @@ const plugin: AgentPlugin = {
         const p = raw as { subject?: string };
         let sid: string | undefined;
         if (p.subject) {
-          const s = pickSubject(String(p.subject));
-          if (!s) fail(`没有找到科目：${p.subject}`);
-          sid = s.id;
+          sid = requireSubject(String(p.subject)).id;
         }
         const stats = srsStats(sid);
         const due = dueCards(sid);
-        if (!stats.total) return ok("还没有复习卡。打开知识点的「练习」会自动出题建卡。");
+        if (!stats.total) {
+          return ok("还没有复习卡。先说要学什么，课件卡里可以直接出题。");
+        }
         const sample = due
           .slice(0, 5)
           .map((c) => `- ${c.front}`)
@@ -71,6 +67,7 @@ const plugin: AgentPlugin = {
           `共 ${stats.total} 张卡：${stats.due} 张到期、${stats.fresh} 张新卡、${stats.mature} 张长期卡。${
             sample ? `\n到期示例：\n${sample}` : "\n今天没有到期卡片。"
           }`,
+          { total: stats.total, due: stats.due, card: { kind: "review", subjectId: sid } },
         );
       },
     },
@@ -106,10 +103,10 @@ const plugin: AgentPlugin = {
           node?: string;
           cards?: { front?: string; back?: string }[];
         };
-        const subject = pickSubject(String(p.subject || ""));
-        if (!subject) fail(`没有找到科目：${p.subject}`);
-        const node = pickNode(subject, String(p.node || ""));
-        if (!node) fail(`「${subject.name}」里没有知识点：${p.node}`);
+        const subject = requireSubject(String(p.subject || ""));
+        const n = resolveNode(subject, String(p.node || ""));
+        if (!n) fail(`「${subject.name}」里没有知识点：${p.node}`);
+        const node = n as NonNullable<typeof n>;
         const pairs = (p.cards || [])
           .map((c) => ({
             front: String(c.front || "").trim(),
@@ -123,8 +120,13 @@ const plugin: AgentPlugin = {
         if (node.status === "todo") {
           updateNode(subject.id, node.id, { status: "doing" });
         }
+        const total = cardsForNode(node.id).length;
         return ok(
-          `已添加 ${added} 张复习卡到「${subject.name} / ${node.title}」。可在「学习 → 练习 / 今日复习」中复习。`,
+          `已添加 ${added} 张复习卡到「${subject.name} / ${node.title}」（共 ${total} 张），在卡片里直接评分。`,
+          {
+            card: { kind: "practice", subjectId: subject.id, nodeId: node.id },
+            added,
+          },
         );
       },
     },

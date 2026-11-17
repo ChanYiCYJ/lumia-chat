@@ -1,7 +1,7 @@
 /**
  * 间隔重复（Anki 式 SRS）
  * ------------------------------------------------------------------
- * 学习页「练习」把 AI 出的题变成记忆卡片，按 Again/Hard/Good/Easy 调度。
+ * 对话里的练习卡/复习卡把 AI 出的题变成记忆卡片，按 Again/Hard/Good/Easy 调度。
  * 纯本地存储 + 纯函数调度，便于单测；不做花哨概念，只保留能解释清楚的规则。
  */
 export type Grade = "again" | "hard" | "good" | "easy";
@@ -29,7 +29,11 @@ const DAY = 86_400_000;
 const MIN = 60_000;
 
 function uid(): string {
-  return "c" + Date.now().toString(36).slice(-4) + Math.random().toString(36).slice(2, 5);
+  return (
+    "c" +
+    Date.now().toString(36).slice(-4) +
+    Math.random().toString(36).slice(2, 5)
+  );
 }
 
 export function loadCards(): StudyCard[] {
@@ -50,7 +54,10 @@ export function saveCards(cards: StudyCard[]): void {
 }
 
 /** 从 AI 输出里解析「问：/答：」卡片（容忍编号、粗体与多余空行） */
-export function parseCards(text: string, max = 6): { front: string; back: string }[] {
+export function parseCards(
+  text: string,
+  max = 6,
+): { front: string; back: string }[] {
   const src = (text || "").replace(/```[\s\S]*?```/g, " ").replace(/\r/g, "");
   const out: { front: string; back: string }[] = [];
   const seen = new Set<string>();
@@ -58,8 +65,14 @@ export function parseCards(text: string, max = 6): { front: string; back: string
     /(?:^|\n)\s*(?:\d+[.、)]\s*)?(?:问|题目|Q)\s*[：:]\s*([\s\S]{2,300}?)\s*\n+\s*(?:答|答案|A)\s*[：:]\s*([\s\S]{1,300}?)(?=\n\s*(?:\d+[.、)]\s*)?(?:问|题目|Q)\s*[：:]|\n*$)/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) && out.length < max) {
-    const front = m[1].replace(/[*_`>#]/g, "").replace(/\s+/g, " ").trim();
-    const back = m[2].replace(/[*_`>#]/g, "").replace(/\s+/g, " ").trim();
+    const front = m[1]
+      .replace(/[*_`>#]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const back = m[2]
+      .replace(/[*_`>#]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
     if (front.length < 2 || back.length < 1) continue;
     const key = front.toLowerCase();
     if (seen.has(key)) continue;
@@ -78,7 +91,9 @@ export function addCards(
 ): number {
   const cards = loadCards();
   const seen = new Set(
-    cards.filter((c) => c.nodeId === nodeId).map((c) => c.front.trim().toLowerCase()),
+    cards
+      .filter((c) => c.nodeId === nodeId)
+      .map((c) => c.front.trim().toLowerCase()),
   );
   let added = 0;
   for (const p of pairs) {
@@ -135,7 +150,10 @@ export function schedule(
   card: Pick<StudyCard, "interval" | "ease" | "reps" | "lapses">,
   grade: Grade,
   now = Date.now(),
-): Pick<StudyCard, "due" | "interval" | "ease" | "reps" | "lapses" | "updatedAt"> {
+): Pick<
+  StudyCard,
+  "due" | "interval" | "ease" | "reps" | "lapses" | "updatedAt"
+> {
   let { interval, ease } = card;
   let reps = card.reps + 1;
   let lapses = card.lapses;
@@ -155,13 +173,13 @@ export function schedule(
       interval = interval < 1 ? 1 : Math.max(1, Math.round(interval * ease));
       break;
     case "easy":
-      interval = interval < 1 ? 3 : Math.max(2, Math.round(interval * ease * 1.3));
+      interval =
+        interval < 1 ? 3 : Math.max(2, Math.round(interval * ease * 1.3));
       ease = Math.min(2.8, ease + 0.15);
       break;
   }
 
-  const due =
-    grade === "again" ? now + 10 * MIN : now + interval * DAY;
+  const due = grade === "again" ? now + 10 * MIN : now + interval * DAY;
   return {
     due,
     interval,
@@ -173,7 +191,11 @@ export function schedule(
 }
 
 /** 评分并落库 */
-export function gradeCard(cardId: string, grade: Grade, now = Date.now()): StudyCard | undefined {
+export function gradeCard(
+  cardId: string,
+  grade: Grade,
+  now = Date.now(),
+): StudyCard | undefined {
   const cards = loadCards();
   const card = cards.find((c) => c.id === cardId);
   if (!card) return undefined;
@@ -190,7 +212,9 @@ export interface SrsStats {
 }
 
 export function srsStats(subjectId?: string, now = Date.now()): SrsStats {
-  const list = loadCards().filter((c) => !subjectId || c.subjectId === subjectId);
+  const list = loadCards().filter(
+    (c) => !subjectId || c.subjectId === subjectId,
+  );
   return {
     total: list.length,
     due: list.filter((c) => c.due <= now).length,

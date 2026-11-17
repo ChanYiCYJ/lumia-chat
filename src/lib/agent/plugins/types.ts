@@ -29,6 +29,15 @@ export interface ToolContext {
   notionDbId?: string;
   /** 关联的对话消息下标（工具卡定位） */
   msgIdx?: number;
+  /**
+   * 后台生成一段文本（工具内部生成课件/题目用）。
+   * 由 AIChat 注入当前模型配置（与聊天共用 endpoint/model，不走流式）。
+   */
+  generate?: (
+    system: string,
+    user: string,
+    opts?: { maxTokens?: number },
+  ) => Promise<string>;
   /** 打开 Agent 面板（可指定产物 id 直接定位） */
   openPanel?: (
     tab: ToolTab,

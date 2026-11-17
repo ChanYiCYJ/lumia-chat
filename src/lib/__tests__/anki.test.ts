@@ -3,7 +3,12 @@ import { createSubject, loadSubjects } from "../study";
 import { createAgentTools } from "../agent/plugins";
 import { loadCards, gradeCard, dueCards } from "../srs";
 
-const ctx = { pageId: 1, sessionId: "anki", mode: "auto" as const, webEnabled: true };
+const ctx = {
+  pageId: 1,
+  sessionId: "anki",
+  mode: "auto" as const,
+  webEnabled: true,
+};
 
 function tool(name: string) {
   const t = createAgentTools(ctx).find((x) => x.name === name);
@@ -11,7 +16,8 @@ function tool(name: string) {
   return t;
 }
 
-const text = (r: { content: unknown[] }) => (r.content[0] as { text: string }).text;
+const text = (r: { content: unknown[] }) =>
+  (r.content[0] as { text: string }).text;
 
 beforeEach(() => localStorage.clear());
 

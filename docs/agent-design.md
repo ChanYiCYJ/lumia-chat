@@ -5,14 +5,14 @@
 
 ## 1. 分层
 
-| 层       | 本项目位置                                     | 职责                                                |
-| -------- | ---------------------------------------------- | --------------------------------------------------- |
-| UI       | `src/components/AIChat.tsx` / `AgentPanel.tsx` | 渲染、输入、状态栏；**不参与**提示词与工具循环      |
-| 运行器   | `src/lib/agent/piRunner.ts`                    | 组装 Agent、订阅事件、预算/收尾、usage 统计         |
-| 模型适配 | `src/lib/agent/piLlm.ts`                       | OpenAI 兼容端点 ↔ pi-ai 的流式/工具协议             |
-| 插件     | `src/lib/agent/plugins/*Plugin.ts`             | 工具 + 提示词 + 卡片 UI + 守卫（自描述）            |
-| 提示词   | `src/lib/skills/*`                             | 按轮次 just-in-time 组装 system（context 段可压缩） |
-| 存储     | `artifacts / kb / todos / study / srs / mcp / contextMode`  | 纯数据 + 纯函数，localStorage 落盘                  |
+| 层       | 本项目位置                                                 | 职责                                                |
+| -------- | ---------------------------------------------------------- | --------------------------------------------------- |
+| UI       | `src/components/AIChat.tsx` / `AgentPanel.tsx`             | 渲染、输入、状态栏；**不参与**提示词与工具循环      |
+| 运行器   | `src/lib/agent/piRunner.ts`                                | 组装 Agent、订阅事件、预算/收尾、usage 统计         |
+| 模型适配 | `src/lib/agent/piLlm.ts`                                   | OpenAI 兼容端点 ↔ pi-ai 的流式/工具协议             |
+| 插件     | `src/lib/agent/plugins/*Plugin.ts`                         | 工具 + 提示词 + 卡片 UI + 守卫（自描述）            |
+| 提示词   | `src/lib/skills/*`                                         | 按轮次 just-in-time 组装 system（context 段可压缩） |
+| 存储     | `artifacts / kb / todos / study / srs / mcp / contextMode` | 纯数据 + 纯函数，localStorage 落盘                  |
 
 ## 2. 一次运行的完整生命周期
 
@@ -100,9 +100,9 @@ sequenceDiagram
 | `open_webpage` / `generate_article`          | ✅ 用户明确要看/要长文 |
 | `write_artifact`                             | ✅ 显式写入            |
 | `kb_save`                                    | ✅（知识库条目）       |
-| `anki_add_cards` / 搜索重答                        | ❌                     |
+| `anki_add_cards` / 搜索重答                  | ❌                     |
 
-工具调用卡片**不再在消息内渲染**；运行态由底部 powerline 状态栏展示（模型 / 模式 / token / 缓存命中 / 待办）。
+工具调用卡片**不再在消息内通用渲染**（运行态由底部 powerline 状态栏展示：模型 / 模式 / token / 缓存命中 / 待办）。例外是学习类工具：它们用 `details.card` 声明，在回复里生成**学习卡片**（路线 / 课件 / 练习 / 复习）；卡片只存引用，内容实时读学习库。
 
 ## 7. 缓存与用量（pi-deepseek-cache 的落地方式）
 

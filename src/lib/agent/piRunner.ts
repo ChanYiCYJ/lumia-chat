@@ -122,6 +122,12 @@ const WRITE_TOOLS = new Set([
   "anki_add",
   "anki_grade",
   "anki_reset",
+  "anki_add_cards",
+  "study_add_subject",
+  "study_add_nodes",
+  "study_mark",
+  "study_teach",
+  "study_practice",
   "plugin_forge_create",
   "plugin_forge_delete",
 ]);
