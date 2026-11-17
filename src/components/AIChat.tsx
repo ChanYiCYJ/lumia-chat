@@ -217,6 +217,7 @@ import {
 import { pickLive2dCharacter } from "../lib/ai";
 import { parseDelta, resolveMaxTokens } from "../lib/providerPresets";
 import { completeText } from "../lib/complete";
+import { buildCrossSessionDigest } from "../lib/crossSession";
 import type { AgentSettingsProps } from "./SettingsTab";
 import { useToast } from "../lib/toast";
 import { Live2DBackground } from "./Live2DBackground";
@@ -2752,6 +2753,11 @@ export function AIChat({
           .join("; "),
         1500,
       );
+    // 跨会话记忆：让新会话也知道其他会话里聊过什么（纯本地拼接，不额外调模型）
+    const crossMemoryText = buildCrossSessionDigest(sessions, activeId);
+    const memoryForPrompt = [crossMemoryText, memory].filter(Boolean).join("\n\n");
+    // 角色模式下 memory 段会被跳过，因此跨会话记忆同时挂到 summary 段（必注入）
+    const summaryForPrompt = [summary, crossMemoryText].filter(Boolean).join("\n\n");
     updateActive((prev) => [...prev, user]);
     setInput("");
     setKbAttachments([]);
@@ -2968,9 +2974,9 @@ export function AIChat({
         const userText = injected[injected.length - 1]?.content || t;
         const agentSystem = assembleSystem({
           knowledge: kbKnowledge,
-          memory,
+          memory: memoryForPrompt,
           personaKnowledge,
-          summary,
+          summary: summaryForPrompt,
           web,
           viewArticle,
           viewIntro: viewIntroText,
@@ -3108,9 +3114,9 @@ export function AIChat({
           injectAttachments(recent),
           upsertAssistant,
           ctrl.signal,
-          summary,
+          summaryForPrompt,
           kbKnowledge,
-          memory,
+          memoryForPrompt,
           web,
           searchMode !== "fast",
           browseAgentOn,
@@ -5229,84 +5235,80 @@ export function AIChat({
           </svg>
           <span className="flex-1 text-xs">设置</span>
         </button>
-          {/* 主题切换：Auto / 亮 / 暗 三态（默认 Auto 跟随系统） */}
-          <div className="mt-1 flex items-center gap-0.5">
-            <button
-              onClick={() => setThemeMode("auto")}
-              title="自动（跟随系统）"
-              aria-label="自动主题"
-              className={`flex flex-1 items-center justify-center rounded-md p-1.5 transition ${themeMode === "auto" ? "bg-white text-gray-900 dark:bg-gray-700 dark:text-gray-100" : "text-gray-400 hover:text-gray-600 dark:text-gray-400 dark:hover:text-gray-200"}`}
-            >
-              <svg
-                className="h-4 w-4"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-              >
-                <circle cx="12" cy="12" r="9" />
-                <path
-                  d="M12 3a9 9 0 010 18z"
-                  fill="currentColor"
-                  stroke="none"
-                />
-              </svg>
-            </button>
-            <button
-              onClick={() => setThemeMode("light")}
-              title="亮色"
-              aria-label="亮色主题"
-              className={`flex flex-1 items-center justify-center rounded-md p-1.5 transition ${themeMode === "light" ? "bg-white text-gray-900 dark:bg-gray-700 dark:text-gray-100" : "text-gray-400 hover:text-gray-600 dark:text-gray-400 dark:hover:text-gray-200"}`}
-            >
-              <svg
-                className="h-4 w-4"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M12 3v2.25m6.364.386l-1.591 1.591M21 12h-2.25m-.386 6.364l-1.591-1.591M12 18.75V21m-4.773-4.227l-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z"
-                />
-              </svg>
-            </button>
-            <button
-              onClick={() => setThemeMode("dark")}
-              title="暗色"
-              aria-label="暗色主题"
-              className={`flex flex-1 items-center justify-center rounded-md p-1.5 transition ${themeMode === "dark" ? "bg-white text-gray-900 dark:bg-gray-700 dark:text-gray-100" : "text-gray-400 hover:text-gray-600 dark:text-gray-400 dark:hover:text-gray-200"}`}
-            >
-              <svg
-                className="h-4 w-4"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M21.752 15.002A9.718 9.718 0 0118 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 009.002-5.998z"
-                />
-              </svg>
-            </button>
-          </div>
-          {/* 站点标识：默认使用当前 AI 机器人的名称与头像（在 AI Chat 页面以 AI 作为站点） */}
-          <div className="mt-1.5 flex items-center gap-1.5 px-1">
-            <BotAvatar
-              src={avatar}
-              name={config.botName || "AI"}
+        {/* 主题切换：Auto / 亮 / 暗 三态（默认 Auto 跟随系统） */}
+        <div className="mt-1 flex items-center gap-0.5">
+          <button
+            onClick={() => setThemeMode("auto")}
+            title="自动（跟随系统）"
+            aria-label="自动主题"
+            className={`flex flex-1 items-center justify-center rounded-md p-1.5 transition ${themeMode === "auto" ? "bg-white text-gray-900 dark:bg-gray-700 dark:text-gray-100" : "text-gray-400 hover:text-gray-600 dark:text-gray-400 dark:hover:text-gray-200"}`}
+          >
+            <svg
               className="h-4 w-4"
-            />
-            <span className="min-w-0 flex-1 truncate text-[10px] text-fg-muted">
-              {config.botName || "AI 助手"}
-            </span>
-          </div>
-          <p className="px-1 pt-1 text-[9px] leading-relaxed text-fg-muted/70">
-            AI 生成内容仅供参考
-          </p>
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+            >
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 3a9 9 0 010 18z" fill="currentColor" stroke="none" />
+            </svg>
+          </button>
+          <button
+            onClick={() => setThemeMode("light")}
+            title="亮色"
+            aria-label="亮色主题"
+            className={`flex flex-1 items-center justify-center rounded-md p-1.5 transition ${themeMode === "light" ? "bg-white text-gray-900 dark:bg-gray-700 dark:text-gray-100" : "text-gray-400 hover:text-gray-600 dark:text-gray-400 dark:hover:text-gray-200"}`}
+          >
+            <svg
+              className="h-4 w-4"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M12 3v2.25m6.364.386l-1.591 1.591M21 12h-2.25m-.386 6.364l-1.591-1.591M12 18.75V21m-4.773-4.227l-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z"
+              />
+            </svg>
+          </button>
+          <button
+            onClick={() => setThemeMode("dark")}
+            title="暗色"
+            aria-label="暗色主题"
+            className={`flex flex-1 items-center justify-center rounded-md p-1.5 transition ${themeMode === "dark" ? "bg-white text-gray-900 dark:bg-gray-700 dark:text-gray-100" : "text-gray-400 hover:text-gray-600 dark:text-gray-400 dark:hover:text-gray-200"}`}
+          >
+            <svg
+              className="h-4 w-4"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M21.752 15.002A9.718 9.718 0 0118 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 009.002-5.998z"
+              />
+            </svg>
+          </button>
+        </div>
+        {/* 站点标识：默认使用当前 AI 机器人的名称与头像（在 AI Chat 页面以 AI 作为站点） */}
+        <div className="mt-1.5 flex items-center gap-1.5 px-1">
+          <BotAvatar
+            src={avatar}
+            name={config.botName || "AI"}
+            className="h-4 w-4"
+          />
+          <span className="min-w-0 flex-1 truncate text-[10px] text-fg-muted">
+            {config.botName || "AI 助手"}
+          </span>
+        </div>
+        <p className="px-1 pt-1 text-[9px] leading-relaxed text-fg-muted/70">
+          AI 生成内容仅供参考
+        </p>
       </div>
     </div>
   );

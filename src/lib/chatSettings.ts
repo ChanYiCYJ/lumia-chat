@@ -307,8 +307,8 @@ export function clearMemory(pageId: number): void {
 //   1. 相同「问题前段」视为同主题，合并为最新一条（避免重复积累）
 //   2. 超过 MAX_MEMORY_LINES 时只保留最新条目（丢弃最旧）
 //   3. 超长条目截断，保证总字符数可控
-const MAX_MEMORY_LINES = 10;
-const MAX_MEMORY_CHARS = 1400;
+const MAX_MEMORY_LINES = 16;
+const MAX_MEMORY_CHARS = 1800;
 const MAX_LINE_CHARS = 220;
 
 /** 解析记忆文本为行数组（过滤空行） */
@@ -317,6 +317,16 @@ function memoryLines(memory: string): string[] {
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
+}
+
+/** 去掉 Markdown 标记，只留可读要点（记忆里不应出现 ## 与代码块） */
+function memoryGist(text: string, max: number): string {
+  return (text || "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/[#>*`_~|]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
 }
 
 /**
@@ -328,7 +338,9 @@ export function compressMemory(
   question: string,
   answer: string,
 ): string {
-  const insight = `用户问：${question.slice(0, 50)} → AI 答：${answer.slice(0, 80)}${answer.length > 80 ? "…" : ""}`;
+  const q = memoryGist(question, 80);
+  const a = memoryGist(answer, 100);
+  const insight = `用户问：${q}${a ? ` → AI 答：${a}` : ""}`;
   const lines = memoryLines(oldMemory);
 
   // 1) 同主题合并：问题前 12 字相同视为同一主题，覆盖旧条目

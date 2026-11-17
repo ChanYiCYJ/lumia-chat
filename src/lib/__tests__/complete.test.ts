@@ -31,10 +31,13 @@ describe("completeText（学习页/摘要补全）", () => {
   it("已带 /chat/completions 的地址不重复拼接", async () => {
     const fetchMock = vi.fn(
       async (_url: string) =>
-        new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
+        new Response(
+          JSON.stringify({ choices: [{ message: { content: "ok" } }] }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
     await completeText(
@@ -70,10 +73,13 @@ describe("completeText（学习页/摘要补全）", () => {
       "fetch",
       vi.fn(
         async () =>
-          new Response(JSON.stringify({ choices: [{ message: { content: "" } }] }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          }),
+          new Response(
+            JSON.stringify({ choices: [{ message: { content: "" } }] }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          ),
       ),
     );
     await expect(completeText(cfg, "s", "u")).rejects.toThrow("空内容");

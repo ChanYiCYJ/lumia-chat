@@ -1,13 +1,13 @@
 import { clamp, type SkillContext, type SkillSection } from "./util";
 
-/** 对话记忆（用户偏好，可压缩段 2000）；角色扮演 pureRole 时跳过 */
+/** 跨会话记忆（用户偏好、说过的事实与聊过的主题，可压缩段 2000）；角色扮演 pureRole 时跳过 */
 export function memorySection(ctx: SkillContext): SkillSection {
   const cap = clamp(ctx.memory || "", 2000);
   return {
     id: "memory",
     text:
       !ctx.pureRole && cap
-        ? `\n\n以下是过往对话中学习到的用户偏好与经验，请据此优化你的回答：\n${cap}`
+        ? `\n\n以下是跨会话累积的记忆（来自之前的对话，包含用户说过的事实、偏好与其他会话聊过的内容）。需要时自然地衔接，不要逐条复述或声称“我记得所有细节”：\n${cap}`
         : "",
   };
 }

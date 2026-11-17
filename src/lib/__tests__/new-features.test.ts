@@ -21,14 +21,21 @@ describe("记忆自动压缩", () => {
     expect(second).toContain("Facebook");
   });
 
-  it("超过10条只保留最新", () => {
+  it("超过 16 条只保留最新", () => {
     let long = "";
     for (let i = 0; i < 20; i++) {
       long = compressMemory(long, "问题" + i, "答案内容".repeat(50) + i);
     }
     const lines = long.split("\n").filter(Boolean);
-    expect(lines.length).toBeLessThanOrEqual(10);
+    expect(lines.length).toBeLessThanOrEqual(16);
     expect(long.length).toBeLessThanOrEqual(2000);
+  });
+
+  it("记忆里不保留 Markdown 标记", () => {
+    const mem = compressMemory("", "讲一下向量", "## 定义\n```js\nconst a=1\n```\n**重点**");
+    expect(mem).not.toContain("##");
+    expect(mem).not.toContain("```");
+    expect(mem).toContain("定义");
   });
 });
 

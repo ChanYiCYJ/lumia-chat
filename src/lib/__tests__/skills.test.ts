@@ -57,7 +57,7 @@ describe("skills · assembleSystem 段注入", () => {
       pureRole: true,
     });
     expect(s).toContain("你是角色");
-    expect(s).not.toContain("过往对话中学习到的用户偏好");
+    expect(s).not.toContain("跨会话累积的记忆");
     expect(s).not.toContain("auto-knowledge 人格笔记");
   });
 
@@ -66,7 +66,7 @@ describe("skills · assembleSystem 段注入", () => {
       memory: "用户喜欢柚子社",
       personaKnowledge: "偏爱日常番",
     });
-    expect(s).toContain("过往对话中学习到的用户偏好");
+    expect(s).toContain("跨会话累积的记忆");
     expect(s).toContain("auto-knowledge 人格笔记");
   });
 
@@ -233,7 +233,7 @@ describe("skills · 上下文段 clamp 上限", () => {
     });
     const idxKnowledge = s.indexOf("【重要】你必须优先基于以下用户知识库回答");
     const idxPersona = s.indexOf("人格内容");
-    const idxMemory = s.indexOf("过往对话中学习到的用户偏好");
+    const idxMemory = s.indexOf("跨会话累积的记忆");
     const idxSummary = s.indexOf("对话上下文摘要");
     const idxWeb = s.indexOf("以下是来自网络的最新搜索结果");
     const idxView = s.indexOf("【当前浏览文章】以下是 View 面板");

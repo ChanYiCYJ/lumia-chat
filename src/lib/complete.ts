@@ -101,7 +101,10 @@ export async function completeText(
       );
     }
 
-    const text = parseBody(res.headers.get("content-type") || "", await res.text());
+    const text = parseBody(
+      res.headers.get("content-type") || "",
+      await res.text(),
+    );
     if (!text.trim()) {
       throw new Error(
         "模型返回空内容：可能是输出上限被推理过程占满或被截断，请重试；若反复出现，换一个模型或调大输出上限",
@@ -111,7 +114,9 @@ export async function completeText(
   } catch (e) {
     if (ctrl.signal.aborted) {
       throw new Error(
-        opts.signal?.aborted ? "生成已取消" : "生成超时（120s），请重试或换更快的模型",
+        opts.signal?.aborted
+          ? "生成已取消"
+          : "生成超时（120s），请重试或换更快的模型",
       );
     }
     throw e instanceof Error ? e : new Error(String(e));
