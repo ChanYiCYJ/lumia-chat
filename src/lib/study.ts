@@ -253,12 +253,14 @@ export function lessonPrompt(subject: StudySubject, node: StudyNode): string {
     .join("\n");
 }
 
-/** 出题提示词 */
+/** 出题提示词：必须是「问：/答：」结构，前端直接转 Anki 卡 */
 export function quizPrompt(subject: StudySubject, node: StudyNode): string {
   return [
     `科目：${subject.name}；知识点：${node.title}`,
-    "出 3 道题（概念 1 道 + 计算/编码 2 道，由易到难）。",
-    "每题只写题目并标注考察点，答案统一放最后「答案」小节。",
-    "不要寒暄、鼓励语或额外说明。",
+    "出 3 道由易到难的题，覆盖概念理解与一次具体计算/推导。",
+    "严格按下面格式输出 3 组，不要编号、不要额外说明：",
+    "问：题目（≤60 字）",
+    "答：答案（≤60 字）",
+    "不要出现「以下是」「希望能帮到你」这类套话。",
   ].join("\n");
 }

@@ -32,7 +32,11 @@ describe("记忆自动压缩", () => {
   });
 
   it("记忆里不保留 Markdown 标记", () => {
-    const mem = compressMemory("", "讲一下向量", "## 定义\n```js\nconst a=1\n```\n**重点**");
+    const mem = compressMemory(
+      "",
+      "讲一下向量",
+      "## 定义\n```js\nconst a=1\n```\n**重点**",
+    );
     expect(mem).not.toContain("##");
     expect(mem).not.toContain("```");
     expect(mem).toContain("定义");

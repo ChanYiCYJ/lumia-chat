@@ -18,7 +18,10 @@ src/lib/agent/
 │   ├── mediaPlugin.ts      # 图片：image_search
 │   ├── notionPlugin.ts     # Notion：notion_query（guard：未配置 Token 直接拒绝）
 │   ├── live2dPlugin.ts     # 角色：live2d_perform（+ TAG 清洗正则）
-│   ├── ankiPlugin.ts       # 学习：anki_add / anki_due / anki_grade / anki_stats / anki_reset
+│   ├── todoPlugin.ts       # 待办：todo_add / todo_list / todo_done …
+│   ├── studyPlugin.ts      # 学习：建科目 / 排知识点 / 勾进度
+│   ├── ankiPlugin.ts       # 间隔重复：anki_due / anki_add_cards
+│   ├── mcpPlugin.ts        # MCP：动态挂载外部服务工具 + mcp_refresh
 │   ├── forge.ts            # 插件工厂引擎（声明式 DSL 解释器，无 eval）
 │   └── forgePlugin.ts      # 插件工厂插件：plugin_forge_* + 动态生成的 u_* 工具
 ├── piRunner.ts         # 运行器（工具循环 / 中断 / 轮次预算）
@@ -130,11 +133,13 @@ export default {
 - 元工具：`plugin_forge_create` / `plugin_forge_list` / `plugin_forge_get` / `plugin_forge_delete`。
 - 限制：≤20 个插件、每插件 ≤8 工具、每个工具 ≤16 步；跨域接口需目标支持 CORS。
 
-## 内置学习小程序（Anki）
+## 学习与间隔重复
 
-`anki.ts` 是纯 SM-2 调度 + localStorage 存储；`ankiPlugin.ts` 暴露 5 个工具，
-以对话为界面：`anki_due` 只给正面 → 用户作答 → `anki_grade` 揭晓背面并排期。
-新增卡片时会同步写一份「背卡：<卡组>」产物，方便在产物面板翻看/导出。
+学习页（`components/StudyWorkspace.tsx`）不提供手动「生成课件」按钮：
+打开知识点自动生成课件，切到「练习」自动出题；`lib/srs.ts` 负责把问答转成卡片并按
+Again/Hard/Good/Easy 调度（纯函数，可单测）。复习评分在学习页完成，Agent 侧的
+`ankiPlugin` 只负责 `anki_due`（查到期）与 `anki_add_cards`（建卡），不去冒充
+“已经复习”。卡片数据与学习页共用 `kimo_study_cards_v1`。
 
 ## 运行时动态挂载
 
@@ -150,6 +155,7 @@ unregisterPlugin("weather"); // 移除，回落内置实现
 - `src/lib/__tests__/agentPlugins.test.ts`：自动发现、工具名唯一、UI 声明、
   联网/自定义守卫、提示词开关跟随、动态注册与注销、重名报错、TAG 清洗、system 段注入。
 - `src/lib/__tests__/agentTools.test.ts`：每个工具的行为（execute 层）。
-- `src/lib/__tests__/anki.test.ts`：SM-2 排期、去重、统计、anki\_\* 工具闭环。
+- `src/lib/__tests__/anki.test.ts`：建卡去重、到期查询、评分后不再到期。
+- `src/lib/__tests__/srs.test.ts`：调度间隔、易度变化、卡片存储与题目解析。
 - `src/lib/__tests__/forge.test.ts`：规格校验、模板渲染、创建/更新/删除、
   kv 持久化、https/内网限制、失败步骤定位。

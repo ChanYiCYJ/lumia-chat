@@ -111,7 +111,7 @@ describe("学习系统（数据层）", () => {
     expect(p).toContain("常见误区");
     expect(p).toContain("练习");
     expect(p).toContain("不要开场白");
-    expect(quizPrompt(s, s.nodes[0])).toContain("答案");
+    expect(quizPrompt(s, s.nodes[0])).toContain("问：");
   });
 });
 

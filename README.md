@@ -35,6 +35,7 @@ Agent 的能力全部是插件，放进 `src/lib/agent/plugins/` 即自动发现
 | `live2dPlugin` / `panelPlugin` | 表情动作表演、界面导航               |
 | `todoPlugin`                   | 待办清单（与状态栏联动）             |
 | `studyPlugin`                  | 建科目、排知识点、勾进度             |
+| `ankiPlugin`                   | 问答记忆卡、到期复习（Anki 式 SRS）   |
 | `mcpPlugin`                    | 动态挂载外部 MCP 服务工具            |
 | `forgePlugin`                  | AI 自写插件（声明式 DSL，无 `eval`） |
 
@@ -77,9 +78,10 @@ MAIMEMO_TOKEN='你的 Token' npx -y supergateway --stdio "mcp-server-maimemo" \
 
 ### 学习系统
 
-- 科目 → 知识点路线图 → AI 课件 → 练习题 → 进度
-- 新建科目时可用 AI 生成大纲；知识点可重命名、排序、清空或删除课件
-- 依赖关系、完成状态、进度条，AI 也能通过 `study_*` 工具维护进度
+- 打开知识点就自动生成课件，切到「练习」自动出 3 道题并转成问答卡（没有手动「生成」按钮，失败才出现重试）
+- 练习与课件分开成两个页面；卡片按 **Anki 式间隔重复**调度（忘记 / 模糊 / 记住 / 简单，附下次间隔）
+- 科目页显示待复习数量，「今日复习」跨科目排队；评分后自动排进下次到期
+- 新建科目可用 AI 生成大纲；知识点支持排序、重命名、手动修正课件、删除（连带清理复习卡）
 
 ### Live2D
 
@@ -143,6 +145,7 @@ src/
 │  ├─ skills/           # 系统提示词与技能装配
 │  ├─ kb*.ts            # 知识库存储、页面树、双链（kbVault）
 │  ├─ study.ts          # 学习系统数据层
+│  ├─ srs.ts            # Anki 式间隔重复（卡片、评分调度）
 │  └─ __tests__/        # Vitest 单测（39 个文件 / 752 用例）
 ├─ worker.js            # Cloudflare Worker（搜索、Live2D、API 代理）
 └─ wrangler.jsonc       # Workers 配置（静态资源 + SPA 回退）

@@ -12,7 +12,7 @@
 | 模型适配 | `src/lib/agent/piLlm.ts`                       | OpenAI 兼容端点 ↔ pi-ai 的流式/工具协议             |
 | 插件     | `src/lib/agent/plugins/*Plugin.ts`             | 工具 + 提示词 + 卡片 UI + 守卫（自描述）            |
 | 提示词   | `src/lib/skills/*`                             | 按轮次 just-in-time 组装 system（context 段可压缩） |
-| 存储     | `artifacts / kb / todos / anki / contextMode`  | 纯数据 + 纯函数，localStorage 落盘                  |
+| 存储     | `artifacts / kb / todos / study / srs / mcp / contextMode`  | 纯数据 + 纯函数，localStorage 落盘                  |
 
 ## 2. 一次运行的完整生命周期
 
@@ -100,7 +100,7 @@ sequenceDiagram
 | `open_webpage` / `generate_article`          | ✅ 用户明确要看/要长文 |
 | `write_artifact`                             | ✅ 显式写入            |
 | `kb_save`                                    | ✅（知识库条目）       |
-| `anki_add` / 搜索重答                        | ❌                     |
+| `anki_add_cards` / 搜索重答                        | ❌                     |
 
 工具调用卡片**不再在消息内渲染**；运行态由底部 powerline 状态栏展示（模型 / 模式 / token / 缓存命中 / 待办）。
 

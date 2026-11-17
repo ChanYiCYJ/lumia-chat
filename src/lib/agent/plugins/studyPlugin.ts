@@ -39,7 +39,8 @@ const plugin: AgentPlugin = {
   promptLines: () =>
     `- 【学习】用户说「想学某科目 / 帮我排个学习路线」时：先用 study_add_subject 建科目 + 大纲（每行一个知识点，可写 标题|concept/practice/lab），再用 study_add_nodes 补节点。
 - 讲课时先 study_list 看进度，挑「当前节点」讲；用户说「学完了」用 study_mark 勾完成。
-- 课件/练习题让用户在「学习」页点「生成课件 / 出题考我」生成；你也可以直接在对话里讲解，但进度要落到 study_* 里。
+- 学习页的课件与练习都是自动生成的：打开知识点自动出课件，切到「练习」自动出题建卡（间隔重复在「今日复习」）。
+- 你想补充记忆卡时用 anki_add_cards；进度变更仍要落到 study_*，不要空口说已保存。
 `,
 
   tools: () => [

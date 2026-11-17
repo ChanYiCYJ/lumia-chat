@@ -178,7 +178,8 @@ describe("skills · 知识融合段", () => {
 describe("skills · Notion 段", () => {
   it("notion 内容存在：注入 Notion 资料段（含当天日期）", () => {
     const s = sys({
-      notion: "【Notion 资料📓】以下是当前 Notion Workspace 中检索到的相关内容：\n- 项目计划",
+      notion:
+        "【Notion 资料📓】以下是当前 Notion Workspace 中检索到的相关内容：\n- 项目计划",
     });
     expect(s).toContain("当前 Notion Workspace");
     expect(s).toContain("项目计划");

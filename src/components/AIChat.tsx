@@ -116,7 +116,7 @@ import { ArticleComposerModal } from "./ArticleComposerModal";
 import { AgentPanel } from "./AgentPanel";
 import { PluginsPage } from "./PluginsPage";
 import { PowerlineFooter } from "./PowerlineFooter";
-import { StudyPage } from "./StudyPage";
+import { StudyWorkspace } from "./StudyWorkspace";
 import type { ActivityItem } from "./AgentActivityCard";
 import { extractSourceLinks } from "../lib/messageCards";
 // 性能优化：AgentPanel 是重型组件（含编辑器/知识库/Live2D 等）且桌面+移动双实例渲染；
@@ -2755,9 +2755,13 @@ export function AIChat({
       );
     // 跨会话记忆：让新会话也知道其他会话里聊过什么（纯本地拼接，不额外调模型）
     const crossMemoryText = buildCrossSessionDigest(sessions, activeId);
-    const memoryForPrompt = [crossMemoryText, memory].filter(Boolean).join("\n\n");
+    const memoryForPrompt = [crossMemoryText, memory]
+      .filter(Boolean)
+      .join("\n\n");
     // 角色模式下 memory 段会被跳过，因此跨会话记忆同时挂到 summary 段（必注入）
-    const summaryForPrompt = [summary, crossMemoryText].filter(Boolean).join("\n\n");
+    const summaryForPrompt = [summary, crossMemoryText]
+      .filter(Boolean)
+      .join("\n\n");
     updateActive((prev) => [...prev, user]);
     setInput("");
     setKbAttachments([]);
@@ -5451,7 +5455,7 @@ export function AIChat({
                 }}
               />
             ) : mainView === "study" ? (
-              <StudyPage onGenerate={generateStudy} />
+              <StudyWorkspace onGenerate={generateStudy} />
             ) : (
               <div className="flex h-full min-h-0 flex-col bg-surface">
                 {/* 页面标题（全屏页保留顶栏与侧边栏） */}
